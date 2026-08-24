@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------------------
+# Dockerfile.bad - EVERY line here is a real mistake people ship.
+# Your job in the lab is to find all nine before reading solutions.md.
+# Build it and compare:  docker build -f Dockerfile.bad -t lab/app:bad .
+# ---------------------------------------------------------------------------
+
+FROM python:latest
+
+RUN apt-get update
+RUN apt-get install -y curl vim git build-essential
+
+WORKDIR /app
+
+COPY . .
+
+RUN pip install -r requirements.txt
+
+ENV APP_SECRET=supersecret123
+
+EXPOSE 8000
+
+CMD python app.py

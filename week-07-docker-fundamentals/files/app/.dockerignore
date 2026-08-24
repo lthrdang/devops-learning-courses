@@ -1,0 +1,13 @@
+# Without this file, `COPY . .` ships your git history, your virtualenv and
+# your .env into the image - bloating it and leaking secrets. .dockerignore is
+# not optional; it is a security control.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+*.md
+Dockerfile*

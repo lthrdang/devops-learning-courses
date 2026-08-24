@@ -1,0 +1,74 @@
+#cloud-config
+# ---------------------------------------------------------------------------
+# docker-node.yaml — a VM with Docker Engine, used from Week 7 onward and for
+# every node of the Week 10 Swarm cluster.
+#
+# NOTE: we install Docker from Docker's official APT repository, not from the
+# Ubuntu archive or from snap. Reasons, which you should be able to explain:
+#   - the Ubuntu archive package (docker.io) lags upstream by many months;
+#   - the snap runs confined and breaks bind mounts and Swarm overlay networking
+#     in ways that will waste hours of your time.
+# Source of truth: https://docs.docker.com/engine/install/ubuntu/
+# ---------------------------------------------------------------------------
+
+package_update: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - tree
+  - htop
+  - net-tools
+  - dnsutils
+  - tcpdump
+  - netcat-openbsd
+  - shellcheck
+  - python3-pip
+  - python3-venv
+  - git
+  - make
+  - vim
+
+write_files:
+  - path: /etc/profile.d/99-lab.sh
+    permissions: '0644'
+    content: |
+      export PS1='\[\e[1;36m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+      export EDITOR=vim
+      export HISTTIMEFORMAT='%F %T  '
+      export HISTSIZE=10000
+
+  - path: /etc/docker/daemon.json
+    permissions: '0644'
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" },
+        "live-restore": true
+      }
+    # WHY THIS FILE EXISTS - understand it before Week 9:
+    #  - log rotation: the default json-file driver grows without limit. A chatty
+    #    container filling / is a genuine, common production outage.
+    #  - live-restore: containers keep running while the daemon restarts.
+
+runcmd:
+  # --- Docker's official repository, following the upstream install docs ---
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - sh -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list'
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  # Let the 'ubuntu' user drive Docker without sudo.
+  # SECURITY NOTE, and you must be able to articulate this in an interview:
+  # membership of the 'docker' group is equivalent to root on this host, because
+  # you can mount / into a container. Convenient in a lab; a finding in an audit.
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  - [ mkdir, -p, /opt/lab ]
+  - [ chown, 'ubuntu:ubuntu', /opt/lab ]
+  - [ sh, -c, 'date -Is > /opt/lab/.provisioned' ]
+
+final_message: "docker node ready after $UPTIME seconds. Run: docker run --rm hello-world"

@@ -1,0 +1,76 @@
+#cloud-config
+# ---------------------------------------------------------------------------
+# base.yaml — the plain lab VM used in Weeks 1-6.
+#
+# READ THIS FILE. It is your first piece of Infrastructure as Code.
+# Everything below is *declarative*: you describe the machine you want, and
+# cloud-init makes it so on first boot. You never run these steps by hand.
+#
+# Applied with:
+#   multipass launch 24.04 --name lab --cloud-init base.yaml
+# Verify afterwards inside the VM with:
+#   cloud-init status --long
+#   sudo cat /var/log/cloud-init-output.log
+# ---------------------------------------------------------------------------
+
+package_update: true
+package_upgrade: false          # deliberately false: upgrades make first boot slow
+                                # and non-reproducible. Week 11 discusses patching.
+
+packages:
+  # --- inspection: you will use these every single day ---
+  - tree                        # visualise directory structure
+  - htop                        # interactive process viewer
+  - ncdu                        # find what is eating the disk
+  - jq                          # query JSON from the shell
+  - ripgrep                     # fast recursive grep (rg)
+  # --- networking: Week 4-5 ---
+  - net-tools                   # legacy ifconfig/netstat - to compare with `ip`/`ss`
+  - dnsutils                    # dig, nslookup
+  - tcpdump                     # packet capture
+  - netcat-openbsd              # nc: the swiss-army knife of TCP
+  - curl
+  - traceroute
+  - mtr-tiny
+  # --- scripting: Week 3 & 6 ---
+  - shellcheck                  # static analysis for bash - non-negotiable
+  - python3-pip
+  - python3-venv
+  - git
+  - make
+  # --- text ---
+  - vim
+  - less
+
+write_files:
+  - path: /etc/profile.d/99-lab.sh
+    permissions: '0644'
+    content: |
+      # Makes the shell prompt show the hostname in colour, so that when you have
+      # four terminals open you never again run a command on the wrong machine.
+      # That mistake is one of the most common causes of real production incidents.
+      export PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+      export EDITOR=vim
+      # Timestamps in shell history. When you are reconstructing what you did
+      # during an incident, "when" matters as much as "what".
+      export HISTTIMEFORMAT='%F %T  '
+      export HISTSIZE=10000
+      export HISTFILESIZE=20000
+
+  - path: /etc/sysctl.d/99-lab.conf
+    permissions: '0644'
+    content: |
+      # Allow unprivileged processes to bind low ports (<1024).
+      # Week 4 explains WHY this restriction exists and what it protects against.
+      # We relax it here only so that early labs do not require sudo for everything.
+      net.ipv4.ip_unprivileged_port_start=80
+
+runcmd:
+  - [ sysctl, --system ]
+  - [ mkdir, -p, /opt/lab ]
+  - [ chown, 'ubuntu:ubuntu', /opt/lab ]
+  # A marker file. Its presence proves cloud-init reached the end successfully -
+  # a pattern you will reuse for real provisioning.
+  - [ sh, -c, 'date -Is > /opt/lab/.provisioned' ]
+
+final_message: "base lab VM ready after $UPTIME seconds. Marker: /opt/lab/.provisioned"

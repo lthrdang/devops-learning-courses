@@ -1,0 +1,243 @@
+# ---------------------------------------------------------------------------
+# MkDocs Material configuration for the Zero-to-Junior Platform Engineer course.
+#
+#   make docs          serve at http://localhost:8000 with live reload
+#   make docs-build    render a static site you can host anywhere
+#
+# Everything runs through Docker, so nothing is installed on your machine and
+# the system Python is never touched. That is the same reasoning as week 6:
+# `pip install` outside a venv is refused by Ubuntu for good reasons, and
+# reaching for --break-system-packages is not the answer.
+#
+# HOW THE PATHS WORK - read this before you change the docker command.
+#
+# The markdown lives where it belongs: next to the labs and the code it
+# describes. Nothing is copied into a separate docs/ tree, so the site can
+# never drift from the source.
+#
+# MkDocs refuses a docs_dir that CONTAINS its own config file, and this
+# filesystem does not support symlinks, so neither of the usual tricks works.
+# Instead the Makefile mounts the repository so that the paths look right from
+# inside the container:
+#
+#     -v $(REPO):/site/docs          the repo becomes docs_dir
+#     -v $(REPO)/mkdocs.yml:/site/mkdocs.yml    the config becomes its SIBLING
+#     -w /site
+#
+# From mkdocs' point of view this is an ordinary layout. From yours, the
+# config still lives in the repository where it belongs and is version
+# controlled with everything else.
+# ---------------------------------------------------------------------------
+
+site_name: Zero-to-Junior Platform Engineer
+site_description: A 12-week hands-on course from basic coding to junior platform engineer, built on Multipass, Linux, Docker and free open-source tooling.
+site_author: Platform Engineering Training
+
+# Both are relative to the config file, i.e. /site inside the container.
+docs_dir: docs
+site_dir: site
+use_directory_urls: true
+
+theme:
+  name: material
+  language: en
+  icon:
+    logo: material/console-line
+    repo: fontawesome/brands/git-alt
+  features:
+    - navigation.instant        # SPA-style navigation, no full page reloads
+    - navigation.tracking
+    - navigation.sections       # weeks appear as grouped sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy         # a copy button on every code block
+    - content.code.annotate
+    - content.tabs.link
+    - toc.follow
+  palette:
+    # Light and dark, with an explicit toggle. Learners read this at 09:00 and
+    # at 23:00 and want different things.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: deep orange
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+plugins:
+  - search:
+      lang: en
+      separator: '[\s\-\.\_]+'   # split on dots and underscores too, so a search
+                                 # for "pipefail" finds "set -o pipefail" and a
+                                 # search for "isready" finds "pg_isready"
+
+markdown_extensions:
+  # --- structure ---
+  - toc:
+      permalink: "#"
+      toc_depth: 3
+  - attr_list
+  - md_in_html
+  - def_list
+  - tables
+  - footnotes
+
+  # --- callouts and collapsibles ---
+  # The course uses > blockquotes heavily for "the lesson" asides, and <details>
+  # for the hidden diagnoses in the labs. Both render correctly with these.
+  - admonition
+  - pymdownx.details
+  - pymdownx.blocks.caption
+
+  # --- code ---
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        # ```mermaid blocks render as diagrams rather than as code
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+  # --- text ---
+  - pymdownx.tasklist:
+      custom_checkbox: true      # the week-12 exit checklist renders properly
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.smartsymbols
+  - pymdownx.caret
+  - pymdownx.mark
+  - pymdownx.tilde
+
+# --- what NOT to publish ------------------------------------------------
+# gitignore-style patterns, relative to docs_dir.
+exclude_docs: |
+  .gitignore
+  mkdocs.yml
+  Makefile
+  # The rendered site is bind-mounted back into the repo, so from
+  # inside the container it also appears under docs_dir. MkDocs has
+  # no way to detect that, so exclude it or the build eats itself.
+  site/
+  .venv/
+  venv/
+  node_modules/
+  __pycache__/
+  .pytest_cache/
+  # An orphaned temp file from a failed `sed -i` that this filesystem refuses
+  # to unlink (EOVERFLOW). Not course content; excluded so builds do not fail.
+  infra/scripts/sed*
+  # Generated lab artefacts, if a learner has run things in-tree.
+  **/tls/
+  **/secrets/
+  **/*.pcap
+  **/access.log
+  **/backups/
+
+# Files that exist and are served but deliberately are not nav entries -
+# without this every lab `files/` asset produces a build warning.
+not_in_nav: |
+  week-*/files/**
+  infra/cloud-init/**
+  infra/scripts/**
+  infra/Makefile
+
+nav:
+  - Home: README.md
+  - Setup:
+      - Install & sizing: SETUP.md
+      - Lab infrastructure: infra/README.md
+  - "Week 00 · Pre-flight":
+      - Theory: week-00-preflight/README.md
+      - Lab: week-00-preflight/lab.md
+      - Challenges: week-00-preflight/challenges.md
+      - Solutions: week-00-preflight/solutions.md
+  - "Week 01 · Linux Foundations":
+      - Theory: week-01-linux-foundations/README.md
+      - Lab: week-01-linux-foundations/lab.md
+      - Challenges: week-01-linux-foundations/challenges.md
+      - Solutions: week-01-linux-foundations/solutions.md
+  - "Week 02 · Linux Sysadmin":
+      - Theory: week-02-linux-sysadmin/README.md
+      - Lab: week-02-linux-sysadmin/lab.md
+      - Challenges: week-02-linux-sysadmin/challenges.md
+      - Solutions: week-02-linux-sysadmin/solutions.md
+  - "Week 03 · Bash Scripting":
+      - Theory: week-03-bash-scripting/README.md
+      - Lab: week-03-bash-scripting/lab.md
+      - Challenges: week-03-bash-scripting/challenges.md
+      - Solutions: week-03-bash-scripting/solutions.md
+  - "Week 04 · Networking":
+      - Theory: week-04-networking-fundamentals/README.md
+      - Lab: week-04-networking-fundamentals/lab.md
+      - Challenges: week-04-networking-fundamentals/challenges.md
+      - Solutions: week-04-networking-fundamentals/solutions.md
+  - "Week 05 · HTTP, TLS, Proxy, LB":
+      - Theory: week-05-http-tls-proxy-lb/README.md
+      - Lab: week-05-http-tls-proxy-lb/lab.md
+      - Challenges: week-05-http-tls-proxy-lb/challenges.md
+      - Solutions: week-05-http-tls-proxy-lb/solutions.md
+  - "Week 06 · Python for Platform":
+      - Theory: week-06-python-for-platform/README.md
+      - Lab: week-06-python-for-platform/lab.md
+      - Challenges: week-06-python-for-platform/challenges.md
+      - Solutions: week-06-python-for-platform/solutions.md
+  - "Week 07 · Docker Fundamentals":
+      - Theory: week-07-docker-fundamentals/README.md
+      - Lab: week-07-docker-fundamentals/lab.md
+      - Challenges: week-07-docker-fundamentals/challenges.md
+      - Solutions: week-07-docker-fundamentals/solutions.md
+  - "Week 08 · Docker Compose":
+      - Theory: week-08-docker-compose/README.md
+      - Lab: week-08-docker-compose/lab.md
+      - Challenges: week-08-docker-compose/challenges.md
+      - Solutions: week-08-docker-compose/solutions.md
+  - "Week 09 · Observability":
+      - Theory: week-09-observability-troubleshooting/README.md
+      - Lab: week-09-observability-troubleshooting/lab.md
+      - Challenges: week-09-observability-troubleshooting/challenges.md
+      - Solutions: week-09-observability-troubleshooting/solutions.md
+  - "Week 10 · Docker Swarm":
+      - Theory: week-10-docker-swarm/README.md
+      - Lab: week-10-docker-swarm/lab.md
+      - Challenges: week-10-docker-swarm/challenges.md
+      - Solutions: week-10-docker-swarm/solutions.md
+  - "Week 11 · Production & CI/CD":
+      - Theory: week-11-production-security-ci/README.md
+      - Lab: week-11-production-security-ci/lab.md
+      - Challenges: week-11-production-security-ci/challenges.md
+      - Solutions: week-11-production-security-ci/solutions.md
+  - "Week 12 · Capstone":
+      - Brief: week-12-capstone/README.md
+      - The five days: week-12-capstone/lab.md
+      - Stretch: week-12-capstone/challenges.md
+      - Assessment guide: week-12-capstone/solutions.md
+      - Postmortem template: week-12-capstone/files/postmortem-template.md
+      - Status updates: week-12-capstone/files/status-update-template.md
+  - Reference:
+      - Assessment: ASSESSMENT.md
+      - Resources: RESOURCES.md
+      - Glossary: GLOSSARY.md
+      - Chaos drills: infra/chaos/README.md

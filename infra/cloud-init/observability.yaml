@@ -1,0 +1,54 @@
+#cloud-config
+# ---------------------------------------------------------------------------
+# observability.yaml — Docker node plus a node_exporter running on the HOST OS
+# (not in a container), used in Week 9.
+#
+# Why node_exporter is deliberately NOT containerised here: a container sees a
+# namespaced view of /proc and /sys. Host metrics collected from inside a
+# container are subtly wrong. Understanding that distinction is the point of the
+# exercise, and it is a mistake real teams ship to production.
+# ---------------------------------------------------------------------------
+
+merge_how:
+  - name: list
+    settings: [append]
+  - name: dict
+    settings: [no_replace, recurse_list]
+
+package_update: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - htop
+  - sysstat            # sar / iostat / mpstat - historical resource data
+  - stress-ng          # generate synthetic CPU / memory / IO load
+  - net-tools
+  - dnsutils
+  - tcpdump
+  - netcat-openbsd
+  - git
+  - make
+  - vim
+  - prometheus-node-exporter
+
+runcmd:
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - sh -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list'
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  # Enable sysstat collection so that on Day 4 you have historical data to read
+  - sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat
+  - systemctl enable --now sysstat
+  - systemctl enable --now prometheus-node-exporter
+  - [ mkdir, -p, /opt/lab ]
+  - [ chown, 'ubuntu:ubuntu', /opt/lab ]
+  - [ sh, -c, 'date -Is > /opt/lab/.provisioned' ]
+
+final_message: "observability node ready. node_exporter: curl -s localhost:9100/metrics | head"

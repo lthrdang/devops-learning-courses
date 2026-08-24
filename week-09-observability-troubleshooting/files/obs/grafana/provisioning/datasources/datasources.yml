@@ -1,0 +1,21 @@
+# Provisioning datasources as CODE rather than clicking them in the UI: the
+# same reason cloud-init exists. A Grafana you cannot rebuild from a file is a
+# pet (week 0).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s        # match prometheus scrape_interval
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      # Links a log line to the trace it belongs to, when you add tracing.
+      maxLines: 1000

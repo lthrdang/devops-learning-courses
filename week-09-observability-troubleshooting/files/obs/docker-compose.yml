@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# The week-9 observability stack. Everything here is free and open source, and
+# is what real teams run.
+#
+#   docker compose up -d
+#   Grafana:     http://<VM_IP>:3000   (admin/admin)
+#   Prometheus:  http://<VM_IP>:9090
+# ---------------------------------------------------------------------------
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      # Needed for Grafana's "Explore" to work well and for recording rules.
+      - --web.enable-lifecycle          # POST /-/reload instead of restarting
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - promdata:/prometheus
+    ports: ["0.0.0.0:9090:9090"]        # lab only; see week 7 on binding
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Anonymous viewing makes the lab easier; never do this in production.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["0.0.0.0:3000:3000"]
+    depends_on: [prometheus, loki]
+    restart: unless-stopped
+
+  # cAdvisor exposes PER-CONTAINER metrics. Note what it has to mount to do
+  # that - it is reading the host's cgroup and container state directly. This
+  # is a heavily privileged container; understand that before copying it.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    command: ["--docker_only=true", "--housekeeping_interval=10s"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices: ["/dev/kmsg"]
+    privileged: true
+    ports: ["127.0.0.1:8081:8080"]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - lokidata:/loki
+    ports: ["127.0.0.1:3100:3100"]
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    restart: unless-stopped
+
+volumes:
+  promdata:
+  grafanadata:
+  lokidata:

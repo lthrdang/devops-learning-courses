@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------------------
+# Alert rules.
+#
+# THE TEST FOR EVERY RULE IN THIS FILE:
+#   "If this fires at 3am, is there something a human must do RIGHT NOW?"
+# If the answer is no, it belongs on a dashboard, not in this file.
+#
+# That is why there is no "CPU above 80%" alert here. A busy server doing its
+# job is not an incident, and an alert that fires without requiring action
+# trains people to ignore ALL alerts - including the one that mattered.
+# ---------------------------------------------------------------------------
+
+groups:
+  # --- SYMPTOMS: things users experience. These page. --------------------
+  - name: symptoms
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m               # must PERSIST - ignores a single bad scrape
+        labels: { severity: page }
+        annotations:
+          summary: "5xx rate is {{ $value | humanizePercentage }}"
+          description: "More than 5% of requests are failing. Users are affected."
+          runbook: "https://wiki.internal/runbooks/high-error-rate"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 2
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "p99 latency is {{ $value | humanize }}s"
+          description: "Alerting on p99, not the average: an average of 250ms can
+            hide 1% of users waiting 20 seconds, and if a page makes 50 calls
+            then a 1% tail is most page loads."
+
+      - alert: ServiceDown
+        # `up` is synthesised by Prometheus itself: the scrape IS the health
+        # check, so this needs no instrumentation in the target at all.
+        expr: up == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.instance }} is unreachable"
+
+  # --- CAPACITY: predictions. These ticket, they do not page. -------------
+  - name: capacity
+    rules:
+      - alert: DiskWillFillSoon
+        # PREDICTION, not a threshold. "80% full" is arbitrary and fires
+        # constantly on a big disk filling slowly; "full within 4 hours at the
+        # current rate" is actionable EVERY time it fires.
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}[6h], 4*3600) < 0
+          and node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} > 0
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.instance }} fills within ~4h"
+
+      - alert: InodesWillRunOut
+        # The failure mode from week 2 drill 02b: df -h looks fine, writes fail.
+        # Almost nobody monitors this, and it takes production down regularly.
+        expr: |
+          node_filesystem_files_free{fstype!~"tmpfs|overlay"}
+            / node_filesystem_files{fstype!~"tmpfs|overlay"} < 0.10
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.mountpoint }} has under 10% of inodes free"
+          description: "df -h will look healthy. Writes will fail anyway."
+
+      - alert: MemoryPressure
+        # SATURATION, not utilisation. Linux uses spare RAM as cache, so "free"
+        # is always small and means nothing. MemAvailable is the real number,
+        # and swap activity is the signal that the box is in trouble.
+        expr: |
+          node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.instance }} has under 10% memory available"
+
+  # --- CONTAINERS ---------------------------------------------------------
+  - name: containers
+    rules:
+      - alert: ContainerRestartLoop
+        # The week-7 crash loop that `docker ps` hides by showing "Up 3 seconds".
+        expr: rate(container_start_time_seconds[15m]) > 0
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.name }} keeps restarting"
+
+      - alert: ContainerOOMKilled
+        expr: increase(container_oom_events_total[10m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.name }} was OOM killed (exit 137)"
+          description: "Either the memory limit is too low, or the app is leaking."

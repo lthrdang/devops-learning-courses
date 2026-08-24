@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# lab artefacts learners generate
+tls/
+*.pcap
+*.tar.gz
+access.log
+
+# rendered documentation site
+site/
+
+# Secrets and generated credentials from the week-8/11 labs. If a learner runs
+# `make init` in-tree, these appear - they must never be committed.
+secrets/
+*.key
+*.crt
+*.csr
+.env
+
+# Backup artefacts from the week-3/11 drills
+backups/
+*.sql.gz
+*.sha256
+
+# An orphaned temp file left by a failed `sed -i`. This filesystem refuses to
+# unlink it (EOVERFLOW) and git cannot read it, so exclude it explicitly.
+infra/scripts/sed??????
+

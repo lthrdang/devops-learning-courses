@@ -1,0 +1,114 @@
+# .gitea/workflows/ci.yml   (or .github/workflows/ci.yml - the syntax is the same)
+#
+# Gitea Actions is compatible with GitHub Actions workflow syntax, so this file
+# runs on your own hardware or on GitHub unchanged. That compatibility is the
+# reason we use Gitea in this course rather than a bespoke free-tier CI.
+#
+# The pipeline:  lint -> test -> build -> scan -> push -> deploy -> verify
+# Every stage is a gate. The two people omit and then regret are SCAN and VERIFY.
+
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  REGISTRY: node1:5000
+  IMAGE: myapp
+
+jobs:
+  # --- fast feedback first ------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck scripts/*.sh
+      - name: hadolint
+        run: docker run --rm -i hadolint/hadolint < Dockerfile
+      - name: ruff
+        run: pipx run ruff check src/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run --spec pytest pytest -q
+
+  # --- build, scan, push --------------------------------------------------
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        name: Compute an immutable tag
+        run: |
+          # NEVER :latest. A mutable tag means you cannot tell what is running,
+          # cannot roll back deterministically, and `service update --image
+          # app:latest` may not even pull, because the tag did not change.
+          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: docker build -t "$REGISTRY/$IMAGE:${{ steps.meta.outputs.tag }}" .
+
+      - name: Scan
+        run: |
+          # Gate on CRITICAL only. "Zero CVEs" is unachievable and trains people
+          # to add ignore-rules until the scanner is decorative. Review HIGH.
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy image \
+              --exit-code 1 --severity CRITICAL --ignore-unfixed \
+              "$REGISTRY/$IMAGE:${{ steps.meta.outputs.tag }}"
+
+      - name: Scan (report only)
+        if: always()
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy image --severity HIGH --ignore-unfixed \
+              "$REGISTRY/$IMAGE:${{ steps.meta.outputs.tag }}" || true
+
+      - name: Push
+        if: github.ref == 'refs/heads/main'
+        run: docker push "$REGISTRY/$IMAGE:${{ steps.meta.outputs.tag }}"
+
+  # --- deploy and PROVE it worked ----------------------------------------
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rolling update
+        run: |
+          # --detach=false makes this step WAIT for the update to finish and
+          # FAIL if it does not converge. Without it the step returns instantly
+          # and the pipeline goes green before anything has been deployed.
+          docker -H "ssh://deployer@node1" service update \
+            --image "$REGISTRY/$IMAGE:${{ needs.build.outputs.tag }}" \
+            --update-order start-first \
+            --update-failure-action rollback \
+            --update-parallelism 1 \
+            --update-delay 15s \
+            --detach=false \
+            lab_api
+
+      - name: Smoke test
+        # The step that turns "the deploy command succeeded" into "the
+        # application works". It also asserts the VERSION, which catches a
+        # silent no-op deploy that left the old image running.
+        run: ./scripts/smoke-test.sh http://node1:8080 "${{ needs.build.outputs.tag }}"
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          docker -H "ssh://deployer@node1" service rollback --detach=false lab_api
+          echo "::error::deploy failed verification and was rolled back"

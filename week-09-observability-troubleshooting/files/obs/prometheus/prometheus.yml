@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 15s        # how often to pull. 15s is a sane default;
+                              # shorter costs storage, longer blurs incidents.
+  evaluation_interval: 15s    # how often to evaluate alert rules
+  external_labels:
+    cluster: lab
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # Prometheus scrapes ITSELF. Do not remove this - if Prometheus is
+  # unhealthy, this is how you find out.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # node_exporter runs on the HOST OS, not in a container. That is deliberate:
+  # a container sees a namespaced /proc and /sys, so host metrics gathered from
+  # inside one are subtly wrong. host.docker.internal resolves to the host.
+  - job_name: node
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels: { instance: obs-host }
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: app
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels: { service: labapp }

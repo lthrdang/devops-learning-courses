@@ -1,0 +1,131 @@
+# ---------------------------------------------------------------------------
+# Week 10 reference stack.
+#
+#   docker stack deploy -c stack.yml lab
+#   docker stack services lab
+#   docker stack ps lab --no-trunc
+#
+# DIFFERENCES FROM A COMPOSE FILE - the three that catch everyone:
+#   1. `build:` is IGNORED. Swarm deploys images; build and push first.
+#   2. `depends_on` is IGNORED. There are NO start-order guarantees at all.
+#      Your application must retry - week 8's advice becomes mandatory here.
+#   3. `deploy:` is honoured (and ignored by plain `docker compose up`).
+# ---------------------------------------------------------------------------
+
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      # The ROUTING MESH: every node accepts :8080 and forwards to a healthy
+      # task, whether or not that node runs one. This is why you can point a
+      # dumb external load balancer at all three nodes.
+      - target: 80
+        published: 8080
+        protocol: tcp
+        mode: ingress
+    configs:
+      - source: web_index
+        target: /usr/share/nginx/html/index.html
+    networks: [appnet]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      mode: replicated
+      replicas: 3
+      placement:
+        constraints:
+          # Keep application workload off the managers so a runaway container
+          # cannot destabilise the Raft control plane.
+          - node.role == worker
+        preferences:
+          # Spread across zones so losing one zone does not take every replica.
+          - spread: node.labels.zone
+      update_config:
+        parallelism: 1
+        delay: 15s              # MUST exceed startup + healthcheck settling time
+        order: start-first      # add capacity BEFORE removing it (week 5, C5.1)
+        failure_action: rollback
+        max_failure_ratio: 0.2
+        monitor: 20s            # how long a new task must stay healthy to count
+      rollback_config:
+        parallelism: 1
+        order: stop-first       # rolling BACK should be fast, not gentle
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits: { cpus: "0.50", memory: 128M }
+        reservations: { cpus: "0.10", memory: 32M }
+
+  api:
+    image: lab/swarm-api:${API_VERSION:-1.0}
+    networks: [appnet]
+    secrets:
+      # Mounted at /run/secrets/db_password in a TMPFS. Never on disk in the
+      # container, never in `docker inspect`, never in an image layer.
+      - source: db_password
+        target: db_password
+        mode: 0400
+    environment:
+      APP_VERSION: ${API_VERSION:-1.0}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 15s
+        order: start-first
+        failure_action: rollback
+        monitor: 25s
+      restart_policy: { condition: on-failure, delay: 5s, max_attempts: 3 }
+      resources:
+        limits: { memory: 128M }
+      # stop_grace_period is a top-level key, NOT under deploy. If your drain
+      # plus your longest request exceeds it, you cut off live requests.
+    stop_grace_period: 30s
+
+  # A GLOBAL service: exactly one task on every eligible node. This is the mode
+  # for agents - log shippers, metric exporters, security agents.
+  agent:
+    image: alpine:3.20
+    # NOTE THE DOUBLED DOLLARS. Compose interpolates ${VAR} and $(...) in the
+    # stack file BEFORE docker ever sees it, so a shell substitution meant for
+    # the CONTAINER must be escaped as $$. Getting this wrong gives you
+    # "invalid interpolation format", or - worse - a silently empty value.
+    command: ["sh", "-c", "while true; do echo \"$$(date -Is) agent on $$(hostname)\"; sleep 30; done"]
+    networks: [appnet]
+    deploy:
+      mode: global
+      resources:
+        limits: { memory: 32M }
+
+networks:
+  appnet:
+    driver: overlay
+    # attachable lets a plain `docker run` join this network for debugging.
+    # Convenient in a lab; consider whether you want it in production.
+    attachable: true
+
+configs:
+  web_index:
+    file: ./index.html
+
+secrets:
+  db_password:
+    external: true      # created out of band:
+                        #   echo -n 'hunter2' | docker secret create db_password -
+                        # Keeping it external means the secret VALUE never
+                        # appears in a file you might commit.

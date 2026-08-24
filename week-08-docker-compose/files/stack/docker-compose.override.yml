@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# docker-compose.override.yml - DEVELOPMENT settings.
+#
+# Compose merges this on top of docker-compose.yml AUTOMATICALLY, with no
+# flags. That is why `docker compose up` in dev differs from what you deploy.
+#
+# MERGE SEMANTICS, which surprise people:
+#   scalars  -> replaced
+#   maps     -> merged key by key
+#   lists    -> REPLACED WHOLESALE, not appended
+# So the `ports:` list below replaces the base list entirely.
+# Verify with: docker compose config
+# ---------------------------------------------------------------------------
+
+services:
+  api:
+    environment:
+      APP_VERSION: dev
+      LOG_LEVEL: debug
+    volumes:
+      # Bind-mount the source so edits take effect without a rebuild.
+      # Never do this in production: it makes the running code differ from the
+      # image you tested and shipped.
+      - ./api/app.py:/app/app.py:ro
+    ports:
+      - "127.0.0.1:8000:8000"     # reach the api directly, bypassing the proxy
+
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"     # psql from the host, loopback only
