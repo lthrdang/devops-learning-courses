@@ -74,7 +74,7 @@ Audit the stack and answer with evidence (commands and their output):
 3. Is it in `docker compose config` output?
 4. Is it in the shell history of whoever ran `make init`?
 5. Is it in the container's environment?
-6. Who on the host can read `secrets/db_password.txt`?
+6. Who on the host can read `secrets/db_password.txt`? Check the mode of both the file **and** the directory — then try to "harden" the file with `chmod 600 secrets/db_password.txt && docker compose up -d --force-recreate`, and explain the failure you get. What does that tell you about how a Compose `file:` secret reaches the container, and which YAML sub-options would have fixed it if this were Swarm?
 
 For each "yes", state the fix. Then decide which of the remaining risks you would accept for a single-host deployment, and why.
 

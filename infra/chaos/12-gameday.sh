@@ -16,17 +16,16 @@ APPLIED=()
 
 # --- fault pool ---
 if [[ $(pick 1) -lt 60 ]]; then
-  # log flood -> disk pressure
-  cat > /opt/lab/.flood.sh <<'INNER'
-#!/bin/bash
+  # log flood -> disk pressure. Inlined rather than dropped at /opt/lab/.flood.sh:
+  # on game day there are no hints at all, and a readable script sitting in
+  # /opt/lab is the biggest hint there is.
+  setsid bash -c '
 while :; do
   head -c 1M /dev/urandom | base64 >> /var/log/lab-flood.log
   sleep 1
 done
-INNER
-  chmod +x /opt/lab/.flood.sh
-  setsid /opt/lab/.flood.sh >/dev/null 2>&1 </dev/null &
-  APPLIED+=("log flood filling / via /var/log/lab-flood.log (find with du -x / | sort -h | tail; kill /opt/lab/.flood.sh)")
+' >/dev/null 2>&1 </dev/null &
+  APPLIED+=("log flood filling / via /var/log/lab-flood.log (find with du -x / | sort -h | tail; stop it with pkill -f lab-flood.log)")
 fi
 
 if [[ $(pick 2) -lt 55 ]]; then

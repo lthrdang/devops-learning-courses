@@ -9,7 +9,12 @@
 #   1. `build:` is IGNORED. Swarm deploys images; build and push first.
 #   2. `depends_on` is IGNORED. There are NO start-order guarantees at all.
 #      Your application must retry - week 8's advice becomes mandatory here.
-#   3. `deploy:` is honoured (and ignored by plain `docker compose up`).
+#   3. `deploy:` is honoured HERE - but it is NOT simply "ignored by compose",
+#      which is the folklore. Compose v2 applies `deploy.replicas` and
+#      `deploy.resources.limits` itself (week 8's stack relies on the memory
+#      limit being real). What only Swarm can act on is the cluster-only
+#      subset below: `placement`, `update_config`, `rollback_config`,
+#      `endpoint_mode`, and swarm `restart_policy` semantics.
 # ---------------------------------------------------------------------------
 
 services:

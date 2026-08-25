@@ -120,7 +120,17 @@ fi
 # hand-rolled lockfile races between test and create, and leaves a stale lock
 # behind after a crash - which then blocks every future run.
 if (( DRY_RUN == 0 )); then
-  if ! exec 9>"${LOCKFILE}" 2>/dev/null; then
+  # WHY THE BRACES - a second trap, and a nastier one than show_cmd's. `exec`
+  # with redirections and NO command applies those redirections to the current
+  # shell, permanently. Written as `exec 9>"${LOCKFILE}" 2>/dev/null` the
+  # 2>/dev/null is not a one-off silencer for this line: it rebinds fd 2 for the
+  # whole rest of the run, and every log call after it - including the die()
+  # below that explains why we are giving up - is thrown away. The script then
+  # exits 1 with no output at all, which is the worst possible failure mode for
+  # something you run unattended at 3am. Wrapping the exec in a group confines
+  # the 2>/dev/null to the group, so it hides only the error message from THIS
+  # redirection and leaves stderr intact afterwards.
+  if ! { exec 9>"${LOCKFILE}"; } 2>/dev/null; then
     LOCKFILE=/tmp/${PROG%.sh}.lock      # fall back when not running as root
     exec 9>"${LOCKFILE}"
   fi

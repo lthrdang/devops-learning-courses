@@ -11,16 +11,17 @@ clients:
   - url: http://loki:3100/loki/api/v1/push
 
 scrape_configs:
-  # --- systemd journal ---------------------------------------------------
-  - job_name: journal
-    journal:
-      max_age: 12h
-      labels: { job: systemd-journal }
-    relabel_configs:
-      - source_labels: ["__journal__systemd_unit"]
-        target_label: unit
-      - source_labels: ["__journal__hostname"]
-        target_label: host
+  # --- NO systemd journal job, and that is deliberate --------------------
+  # You will find `journal:` scrape configs all over the internet for exactly
+  # this stack. They do not work with the official grafana/promtail image. The
+  # journal reader needs cgo (CGO_ENABLED=1) and the promtail_journal_enabled
+  # build tag, and the published image is built with neither - so promtail
+  # accepts the config, logs one warning at startup, ships nothing, and
+  # job="systemd-journal" never appears in Loki. A config that parses is not a
+  # config that works; check the DATA arrived, not that the process started.
+  # If you want host logs here, either read the files under /var/log (the
+  # varlogs job below does) or move to Grafana Alloy, which ships journal
+  # support in its stock image.
 
   # --- docker containers -------------------------------------------------
   - job_name: docker

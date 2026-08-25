@@ -34,7 +34,7 @@ docker node ls
 #                 ^Ready   ^Active        ^Leader / Reachable
 ```
 
-`STATUS` is *can I reach it*. `AVAILABILITY` is *may I schedule on it*. A node can be `Ready` and `Drain` — healthy, reachable, and deliberately empty. **This is fault 1 of the drill.**
+`STATUS` is *can I reach it*. `AVAILABILITY` is *may I schedule on it*. A node can be `Ready` and `Drain` — healthy, reachable, and deliberately empty. **This is fault B of the drill** — the one that is still there after you have fixed the obvious one.
 
 ```bash
 # 1.2 Quorum arithmetic
@@ -283,6 +283,8 @@ Time three things and write them down:
 2. how long until its tasks are rescheduled elsewhere;
 3. **how many requests failed in terminal A.**
 
+> Watch the state the old tasks land in: **`ORPHANED`**, not `FAILED` or `SHUTDOWN`. The manager has not learned that those containers stopped — it *cannot*, because the only machine that knows is the one that stopped answering. `ORPHANED` is Swarm being honest about the difference between "this task is dead" and "I have given up waiting to find out". Replacement tasks are scheduled anyway, which is why a hard node failure can briefly run more containers than you asked for.
+
 ```bash
 multipass start node3
 docker node ls          # it rejoins
@@ -299,7 +301,7 @@ docker node ls                      # node2: Ready / Drain
 docker node update --availability active node2
 ```
 
-> **`Ready` and `Drain` simultaneously.** Healthy, reachable, deliberately empty. Forgetting to reactivate after maintenance is fault 1 of the drill and a very common real-world cause of "why are only 4 of my 6 replicas running?".
+> **`Ready` and `Drain` simultaneously.** Healthy, reachable, deliberately empty. Forgetting to reactivate after maintenance is **fault B** of the drill and a very common real-world cause of "why are only 4 of my 6 replicas running?". Note that a drained node only *shows up* as a shortfall when something stops Swarm packing the missing tasks onto the survivors — a `--replicas-max-per-node` cap, a resource reservation, or an anti-affinity preference. Without one, you get a green `6/6` and a service one machine away from a bad day.
 
 ---
 
@@ -335,6 +337,11 @@ make snapshot VM=node1 NAME=pre-w10
 make break VM=node1 DRILL=10-swarm
 ```
 
-Symptom: *"I scaled to 6 replicas twenty minutes ago. `docker service ls` still says 4/6. All three nodes are Ready."*
+Symptom: *"I scaled to 6 replicas twenty minutes ago. `docker service ls` still says **0/6** — not one of them is running. All three nodes are Ready."*
 
-Note the phrasing: **"all three nodes are Ready"**. Given Part 5.1, what has the reporter probably not looked at?
+Two things to settle before you touch a command:
+
+1. **`0/6`, not `4/6`.** *Every* task is unplaced. What class of cause can fail every task in a service identically — and what class of cause could not possibly do that? Classify before you dig; it eliminates most of the search space in one glance.
+2. **"all three nodes are Ready".** Given Part 5.1, which column has the reporter not looked at?
+
+There are two independent faults here, and the second is invisible until you have fixed the first. When the count moves off `0/6`, do not stop — check it against what you asked for.

@@ -271,7 +271,7 @@ make snapshot VM=alpha NAME=pre-w04
 make break VM=alpha DRILL=04-network
 ```
 
-Symptom: *"From alpha I can ping beta, so the network is fine. But `curl http://beta:8080` hangs."*
+Symptom: *"From alpha I can ping beta's IP address just fine, so the network is obviously up. But curl http://beta:8080 just hangs and eventually times out. ping beta by name gets nothing either - I assume ICMP is filtered for hostnames or something. Can someone open port 8080 on the firewall?"*
 
 There are **three** layered faults. Find all three. The first one you fix will not make it work, and that is the lesson.
 

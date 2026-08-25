@@ -129,6 +129,14 @@ All of these are free and open source, and all are what real teams run.
 | **Promtail / Alloy** | ships logs into Loki |
 | **Alertmanager** | deduplicates, groups and routes alerts |
 
+> ### ⚠️ Promtail is end of life — and this course still uses it on purpose
+>
+> **Grafana declared Promtail EOL on 2 March 2026.** Commercial support has ended, there will be no further releases, and Grafana's own documentation says you must migrate to **Alloy** or another supported client. Read it yourself: <https://grafana.com/docs/loki/latest/send-data/promtail/>.
+>
+> The lab stack pins `grafana/promtail:3.6.8` anyway, and that is a decision rather than an oversight. Promtail's config file is about fifteen readable lines — a `scrape_configs:` block that looks exactly like Prometheus's, which you have just learned. Alloy's equivalent is a River-syntax pipeline of `loki.source.*` / `loki.process` / `loki.write` components, and learning a component graph at the same time as learning what a log shipper *does* costs you the lesson.
+>
+> **What you must take away from this:** in a real job you would migrate, and the migration is one command — `alloy convert --source-format=promtail --output=config.alloy promtail.yml`. An EOL dependency that you have consciously pinned, dated and written down is technical debt. The same dependency on `:latest`, with nobody aware it is dead, is an incident waiting for a maintenance window that never comes. **The difference is entirely whether someone wrote this paragraph.**
+
 **Prometheus pulls.** It scrapes an HTTP endpoint on a schedule. That inverts the usual model and has a useful consequence: the scrape itself is a health check, and `up == 0` tells you a target is unreachable without any extra configuration.
 
 ### 3.1 PromQL, the parts you actually need
@@ -260,7 +268,7 @@ Symptom: *"The site is slow. Not down. Sometimes fine, sometimes five seconds. N
 
 **Three simultaneous causes.** Use USE on each resource. Do not guess.
 
-Afterwards, clean up: `sudo pkill stress-ng; sudo tc qdisc del dev $(cat /root/.drill09-iface) root`
+Afterwards, the cleanup commands are at the bottom of the answer key — `sudo cat /root/.drill-09-latency | base64 -d`. They are not printed here or by the drill itself, because a cleanup command names the fault it cleans up, and two of the three would be handed to you before you had measured anything.
 
 ## Recommended reading
 

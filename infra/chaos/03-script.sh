@@ -7,6 +7,9 @@ install -d -m 0755 /opt/lab/data /opt/lab/backups
 for i in 1 2 3; do echo "record ${i}" > "/opt/lab/data/file${i}.txt"; done
 
 # --- the damage: a plausible, badly written script ---
+# Three planted faults; the key is in /root/.drill-03-script. Nothing inside the
+# heredoc may name them - this file lands on the learner's VM, so a comment in
+# here turns `cat /opt/lab/backup.sh` into the answer sheet.
 cat > /opt/lab/backup.sh <<'INNER'
 #!/bin/bash
 # Nightly backup of /opt/lab/data
@@ -14,14 +17,10 @@ SRC=/opt/lab/data
 DEST=/opt/lab/backups
 STAMP=$(date +%Y%m%d-%H%M%S)
 
-# Fault 1: unquoted variable, and $BACKUP_ROOT is never set, so this expands to
-#          "tar -czf /archive-... " with an empty prefix -> wrong path entirely.
 ARCHIVE=$BACKUP_ROOT/archive-$STAMP.tar.gz
 
-# Fault 2: no `set -e` and no error check. tar failing is invisible.
 tar -czf $ARCHIVE $SRC 2>/dev/null
 
-# Fault 3: the exit status checked belongs to `echo`, not to `tar`.
 echo "backup written to $ARCHIVE"
 if [ $? -eq 0 ]; then
   echo "$(date -Is) backup OK" >> /var/log/lab-backup.log

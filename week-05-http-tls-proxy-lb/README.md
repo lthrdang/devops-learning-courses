@@ -155,8 +155,10 @@ upstream app_backend {
 }
 
 server {
-    listen 443 ssl;
-    http2 on;
+    # `http2 on;` is nginx 1.25.1+. On Ubuntu 24.04 (nginx 1.24) it is an
+    # unknown directive - use the `http2` parameter on `listen` instead, which
+    # is valid in both. Check `nginx -v` before copying an http2 line anywhere.
+    listen 443 ssl http2;
     server_name app.lab.local;
 
     ssl_certificate     /etc/nginx/tls/app.crt;   # leaf + intermediates, in that order

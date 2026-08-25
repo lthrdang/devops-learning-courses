@@ -89,11 +89,41 @@ groups:
     rules:
       - alert: ContainerRestartLoop
         # The week-7 crash loop that `docker ps` hides by showing "Up 3 seconds".
-        expr: rate(container_start_time_seconds[15m]) > 0
-        for: 15m
+        #
+        # This rule used to read `rate(container_start_time_seconds[15m]) > 0`,
+        # which looks obviously right and is a category error. Two reasons:
+        #
+        #   1. container_start_time_seconds is a GAUGE holding a unix
+        #      timestamp. `rate()` is for COUNTERS. Point it at a timestamp and
+        #      it dutifully divides "the start time jumped forward 200s" by the
+        #      900s window and hands you 0.22 - a number in units of seconds
+        #      per second that means nothing. Measured on a real crash loop
+        #      with 4 restarts, it returned 0.219; on a SINGLE restart it also
+        #      returns something greater than zero. `> 0` therefore does not
+        #      distinguish a loop from one ordinary redeploy, which is the only
+        #      thing the alert was supposed to do.
+        #   2. It is also fragile in the other direction. A restart sometimes
+        #      lands in a NEW series - cAdvisor keys containers by cgroup, and
+        #      a new cgroup means a new series whose value is flat from birth,
+        #      so rate() over it is 0 and the restart vanishes entirely.
+        #
+        # `changes()` is the right primitive for a gauge: it counts how many
+        # times the value CHANGED inside the window, which for a start-time
+        # gauge is exactly "how many times did this container start". Summing
+        # by name covers reason 2 as well, because changes(...[15m]) is a range
+        # selector and so still matches series that have since gone stale.
+        # Measured: 0 for all twelve healthy containers, 5 for a container
+        # crash-looping with a docker RestartCount of 4.
+        expr: |
+          sum by (name) (
+            changes(container_start_time_seconds{name!=""}[15m])
+          ) > 2
+        for: 5m
         labels: { severity: ticket }
         annotations:
-          summary: "{{ $labels.name }} keeps restarting"
+          summary: "{{ $labels.name }} restarted {{ $value }} times in 15m"
+          description: "A crash loop. `docker ps` shows it Up a few seconds and
+            looks healthy; `docker ps -a` and the RestartCount are the evidence."
 
       - alert: ContainerOOMKilled
         expr: increase(container_oom_events_total[10m]) > 0

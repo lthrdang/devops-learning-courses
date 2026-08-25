@@ -7,10 +7,12 @@ command -v docker >/dev/null || { echo "this drill needs a docker node"; exit 1;
 install -d -m 0755 /opt/lab/drill07
 cd /opt/lab/drill07
 
+# Fault 3 lives in app.py: it refuses to start without APP_SECRET and writes the
+# reason to STDERR before exiting 1 - which is exactly where `docker logs` looks.
+# The explanation stays out here, because app.py is COPYed into the image and
+# left in /opt/lab/drill07: a comment inside the heredoc ships to the learner.
 cat > app.py <<'INNER'
 import os, sys, http.server, socketserver
-# Fault 3 lives here: the app refuses to start without APP_SECRET, and it writes
-# the reason to STDERR then exits 1 - which is exactly where `docker logs` looks.
 secret = os.environ.get("APP_SECRET")
 if not secret:
     print("FATAL: APP_SECRET is not set", file=sys.stderr)
@@ -24,11 +26,12 @@ socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer(("0.0.0.0", port), H) as s: s.serve_forever()
 INNER
 
+# Fault 2: the HEALTHCHECK below probes port 8080 while the app serves 8000.
+# Same rule - the Dockerfile lands on the box, so it carries no annotation.
 cat > Dockerfile <<'INNER'
 FROM python:3.12-alpine
 WORKDIR /app
 COPY app.py .
-# Fault 2: the healthcheck probes port 8080, the app serves 8000.
 HEALTHCHECK --interval=5s --timeout=2s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/ || exit 1
 CMD ["python", "app.py"]

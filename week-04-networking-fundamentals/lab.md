@@ -200,10 +200,15 @@ resolvectl status
 ```bash
 # 3.1 The two different paths
 getent hosts beta                      # goes through NSS: reads /etc/hosts
-dig beta +short                        # queries DNS directly: probably nothing
+dig beta +short                        # answers! and NOT because DNS knows the name
+dig @1.1.1.1 beta +short               # nothing. no DNS server anywhere holds this name
 ```
 
-> **This is the lesson.** `dig` returned nothing while `getent` succeeded, because the answer is in `/etc/hosts` and `dig` does not read it. If you had debugged with `dig` alone you would have concluded DNS was broken.
+> **This is the lesson.** `dig` with no `@server` is not "querying DNS directly" — on Ubuntu 24.04 it queries whatever is in `/etc/resolv.conf`, which is the **systemd-resolved stub listener on 127.0.0.53**. And resolved reads `/etc/hosts` itself (`ReadEtcHosts=yes` is the default), so it happily answers for `beta` out of a file, dressed up as a DNS response. The moment you aim at a real upstream with `@1.1.1.1`, the answer disappears — because there was never a DNS record, only a line in a text file.
+>
+> Check the resolver you are actually talking to: `dig beta | grep SERVER` says `127.0.0.53#53`, and `resolvectl status` shows what sits behind it.
+>
+> The operational rule that falls out of this: **`getent hosts <name>` for what the application will see, `dig @<upstream> <name>` for what DNS actually holds.** They disagree far more often than people expect — `/etc/hosts`, `nsswitch.conf` ordering, mDNS, and a stub cache all live in the gap — and when they disagree, the *application* is right about its own behaviour and `dig` is right about DNS. Reaching for only one of them is how you spend an afternoon "fixing DNS" that was never broken.
 
 ```bash
 # 3.2 Real DNS

@@ -64,16 +64,30 @@ docker compose ps
 
 ```bash
 # validate BEFORE trusting anything - promtool is the ground truth
-docker run --rm --entrypoint promtool -v "$PWD/prometheus:/p:ro" \
-  prom/prometheus:latest check config /p/prometheus.yml
-docker run --rm --entrypoint promtool -v "$PWD/prometheus:/p:ro" \
-  prom/prometheus:latest check rules /p/alerts.yml
+docker run --rm --entrypoint promtool -v "$PWD/prometheus:/etc/prometheus:ro" \
+  prom/prometheus:v3.14.0 check config /etc/prometheus/prometheus.yml
+docker run --rm --entrypoint promtool -v "$PWD/prometheus:/etc/prometheus:ro" \
+  prom/prometheus:v3.14.0 check rules /etc/prometheus/alerts.yml
 ```
 
-Expected: `SUCCESS: 8 rules found`.
+Expected — the first command prints `SUCCESS: 1 rule files found` (it followed `rule_files:` and validated the file it points at), the second prints `SUCCESS: 8 rules found`. Both exit 0.
+
+> **Look hard at that mount path, because it is the whole point of this step.** The obvious thing to write is `-v "$PWD/prometheus:/p:ro"` — short, and it is only a lab. Do that and `check config` exits **1** with `"/etc/prometheus/alerts.yml" does not exist`, because `prometheus.yml` declares its `rule_files:` as an **absolute path** and an absolute path does not care where *you* chose to mount the directory. The config is right, the container is right, the `-v` flag is wrong.
+>
+> This is not a promtool quirk. It is the single most common way config validation goes wrong in CI: the pipeline mounts the repo at `/workspace`, the config references `/etc/something`, and the check either fails for the wrong reason or — worse — passes while validating nothing. **Mount the directory where the config says it lives.** If you cannot, make the paths relative and be consistent about the working directory.
+>
+> Note the pinned `v3.14.0` too. Validating your config with whatever `:latest` resolved to this morning, then running a different Prometheus in the stack, means you validated a different program than the one you are deploying.
 
 Open from your host browser:
-- Prometheus — `http://<OBS_IP>:9090` → **Status → Targets**. Everything must be `UP`. A `DOWN` target here is your first exercise.
+- Prometheus — `http://<OBS_IP>:9090` → **Status → Targets**. All four jobs — `prometheus`, `node`, `cadvisor`, `app` — must be `UP`. Check it from the command line too, because the UI makes a down target easy to scroll past:
+
+```bash
+curl -s localhost:9090/api/v1/targets \
+  | jq -r '.data.activeTargets[] | "\(.labels.job)\t\(.health)\t\(.lastError)"'
+```
+
+> The `node` and `app` jobs both target `host.docker.internal`, and on **Docker Engine that name does not exist** — it is a Docker Desktop feature. The compose file earns it with `extra_hosts: ["host.docker.internal:host-gateway"]` on the prometheus service. Delete that line, `docker compose up -d`, and watch both jobs go DOWN with `dial tcp: lookup host.docker.internal`; then put it back. Worth doing once, because the failure is silent everywhere except this page — the USE dashboard just draws nothing and `MemoryPressure`, `DiskWillFillSoon` and `InodesWillRunOut` evaluate happily against no data and never fire.
+
 - Grafana — `http://<OBS_IP>:3000` (admin/admin)
 
 ```bash
@@ -98,7 +112,7 @@ curl -s localhost:8000/metrics | head -20
 ```bash
 # 3.1 Validate the exposition format
 curl -s localhost:8000/metrics | docker run --rm -i --entrypoint promtool \
-  prom/prometheus:latest check metrics
+  prom/prometheus:v3.14.0 check metrics
 ```
 
 Clean output means it is valid.
@@ -133,6 +147,43 @@ curl -s localhost:8000/metrics | grep -c '^http_requests_total{'
 ```
 
 > 200+ series from 200 requests, and it grows without bound. Extrapolate to a million users. **This is the single most common way teams destroy their own monitoring**, and it always happens at the worst moment because that is when traffic is highest. Restore the function afterwards.
+
+### 3.2b Now measure it on something you did not write — cAdvisor
+
+The million hypothetical users are easy to nod along to. Here is the same failure sitting inside the stack you just started, with real numbers you can count yourself.
+
+cAdvisor's default is `--store_container_labels=true`, which promotes **every Docker label on a container** into a Prometheus label on **every series that container produces**. Compose sets a lot of labels. Count them:
+
+```bash
+# how many distinct container_label_* labels does cAdvisor emit?
+curl -s localhost:8081/metrics \
+  | grep -o 'container_label_[a-z0-9_]*' | sort -u | tee /tmp/cadvisor-labels.txt | wc -l
+```
+
+Run the stack once with the two flags in `docker-compose.yml` commented out, and once with them in place:
+
+| `--store_container_labels` | distinct `container_label_*` labels |
+|---|---|
+| `true` (the default) | **24** |
+| `false` + a two-entry allow-list | **2** |
+
+Twenty-four is what this five-container stack measured; the number is not fixed, because it is the union of the Docker labels on whatever you happen to be running. Every extra image with a full set of `org.opencontainers.image.*` labels adds more, so it grows as the stack does — which is precisely the wrong direction for a cardinality problem to grow in.
+
+Read `/tmp/cadvisor-labels.txt` from the first run before you move on. Two entries deserve your attention:
+
+```
+container_label_com_docker_compose_config_hash
+container_label_com_docker_compose_project_working_dir
+```
+
+The second is a **full filesystem path** — which is at least stable. The first is a hash of the compose file, so **it changes every time you edit `docker-compose.yml`**. A changed label value does not update a series; it starts a **new** one and abandons the old. Every edit to a compose file, forever, on every container in the project.
+
+```bash
+# total series cAdvisor is producing, before and after
+curl -s localhost:8081/metrics | grep -c '^container_'
+```
+
+> **This is the same bug as `route_of()` returning the raw path, and it arrived pre-installed.** You did not write cAdvisor and you did not choose its defaults — you just ran the image the internet told you to run, inside the very week that teaches cardinality control. That is the honest lesson: the cardinality bombs you have to find are rarely in your own code. They are in a default you never read. Check the `/metrics` output of anything you deploy, count the labels, and ask which of them can change.
 
 ### 3.3 Generate a realistic latency distribution
 
@@ -172,12 +223,18 @@ curl -s "http://localhost:3100/loki/api/v1/label/container/values" | jq
 In Grafana → **Explore** → Loki datasource:
 
 ```logql
-{job="systemd-journal"}
-{job="systemd-journal", unit="ssh.service"}
-{container=~".+"} |= "error"
-{container="obs-prometheus-1"} | json | level="error"
-sum by (container) (rate({container=~".+"}[5m]))
+{container=~".+"}                                    # every container, raw
+{container="obs-prometheus-1"}                       # one container
+{container=~".+"} |= "error"                         # substring filter
+{container=~".+", stream="stderr"}                   # stdout vs stderr
+{job="varlogs", filename="/var/log/auth.log"}        # host files, not containers
+{container="obs-loki-1"} | json | level="error"      # parse, then filter a field
+sum by (container) (rate({container=~".+"}[5m]))     # a METRIC, out of logs
 ```
+
+> **Every label in those queries came out of step 4.1** — you listed them before you queried them. Do that in the order shown. Guessing a label name gets you an empty result set, and an empty result set in Loki looks identical whether the label is wrong, the time range is wrong, or the logs genuinely are not arriving. Three very different problems, one identical screen.
+>
+> **You will find `{job="systemd-journal"}` in half the Promtail tutorials online, and it does not work here.** The journal reader has to be compiled in — `CGO_ENABLED=1` plus the `promtail_journal_enabled` build tag — and the official `grafana/promtail` image is built with neither. Add the `journal:` scrape config and Promtail starts cleanly, logs one warning, and ships nothing at all. That is why `promtail.yml` has a comment where that job would be instead of the job. Host logs reach Loki here through the `varlogs` file job; if you want the journal properly, that is one of the things Grafana Alloy fixes.
 
 ### 4.2 The correlation workflow — practise it
 
@@ -234,6 +291,51 @@ For each of the 8 rules in `alerts.yml`, answer:
 
 Then propose one rule to **delete** and one to **add**. Deleting is harder and more valuable.
 
+### 5.3 Prove that an alert can fire — the audit nobody does
+
+Every rule in that file passes `promtool check rules`. That proves the YAML parses and the PromQL is syntactically legal. It proves **nothing** about whether the expression measures what it claims to.
+
+`ContainerRestartLoop` used to read:
+
+```promql
+rate(container_start_time_seconds[15m]) > 0
+```
+
+Read it. It looks right. Now go and test it, with a real crash loop of your own:
+
+```bash
+docker run -d --name loopy --restart=always alpine sh -c 'sleep 45; exit 1'
+sleep 300
+docker inspect -f '{{.RestartCount}}' loopy       # ← the ground truth
+```
+
+> **Why `sleep 45` and not `sleep 5`?** Try `sleep 5` first and look at what Prometheus has: `count_over_time(container_start_time_seconds{name="loopy"}[15m])` returns **2 samples in fifteen minutes**. cAdvisor housekeeps every 10s and Prometheus scrapes every 15s, so a container that only exists for 5 seconds at a time is almost never *observed alive*. **No expression can alert on data that was never sampled.** That is a lesson in its own right, and it is worth thirty seconds of your time before you move on — your sampling interval sets a hard floor on what you are able to detect at all.
+
+Now run all four against the observable loop:
+
+```promql
+container_start_time_seconds{name="loopy"}
+rate(container_start_time_seconds{name="loopy"}[15m])
+changes(container_start_time_seconds{name="loopy"}[15m])
+sum by (name) (changes(container_start_time_seconds{name!=""}[15m]))
+```
+
+Measured here, against `RestartCount = 4`:
+
+| Expression | Result |
+|---|---|
+| `rate(...)` | **0.219** |
+| `changes(...)` | 4 on the live series, 1 on a stale one |
+| `sum by (name) (changes(...))` | **5** — and **0** for all twelve healthy containers |
+
+So the old rule *did* produce a non-zero number. That is worse than being broken, not better. **`rate()` is for counters, and this metric is a gauge holding a unix timestamp.** Ask what 0.219 is supposed to *mean*: `rate()` took "the start time jumped forward by about 200 seconds", divided it by the 900-second window, and returned seconds per second. It is not a restart count, it is not a frequency, it is not anything. And because *any* value passes `> 0`, the rule fires identically for one ordinary redeploy and for a container looping every forty seconds — which is the single distinction the alert existed to make.
+
+There is a second failure mode underneath it. cAdvisor keys containers by cgroup, so a restart can land in a **brand-new series** whose value is flat from birth — `rate()` over that is exactly 0 and the restart disappears. The rewritten rule uses `changes()`, which is the right primitive for a gauge, and sums by `name` so that restarts split across several series still add up.
+
+Clean up with `docker rm -f loopy`.
+
+> **`promtool check rules` is a syntax checker, not a proof.** The only proof that an alert works is that you made it fire — and that you looked at the number it produced and could say what the number means. Do this once for every rule you write. It takes ten minutes and it is the difference between monitoring and the appearance of monitoring.
+
 ---
 
 ## Part 6 — The 60-second triage, drilled
@@ -266,9 +368,10 @@ Symptom: *"The site is slow. Not down. Sometimes fine, sometimes five seconds. N
 2. Write down three hypotheses and the single cheapest test for each.
 3. Only then start typing.
 
-Timebox 45 minutes. Afterwards:
+Timebox 45 minutes. Afterwards, read the answer key — the cleanup commands are the last three lines of it:
 
 ```bash
-sudo pkill stress-ng
-sudo tc qdisc del dev $(sudo cat /root/.drill09-iface) root
+sudo cat /root/.drill-09-latency | base64 -d
 ```
+
+> **The cleanup steps are deliberately not printed here, and the drill script no longer prints them either.** They used to be, and it gave the game away: `pkill stress-ng` names the CPU fault and `tc qdisc del` names the network fault, so two of the three causes were handed to you in the banner before you had run a single command. A cleanup command is an answer wearing a hard hat.

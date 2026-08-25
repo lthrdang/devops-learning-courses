@@ -11,7 +11,30 @@ services:
   api:
     environment:
       LOG_LEVEL: info
-    volumes: []                    # no source bind mount: run what you shipped
+      # THE CONTRAST WITH `!reset` BELOW - learn both halves together.
+      # Mappings merge KEY BY KEY, and the last file to set a key wins. The dev
+      # override sets `APP_VERSION: dev`; if this file stayed silent, that `dev`
+      # would survive straight into production and every /items response would
+      # report version "dev". No tag can help here and none is needed - you just
+      # have to SET the key. Sequences are the opposite: they append, so setting
+      # them again adds rather than replaces, and only `!reset` clears them.
+      #   mapping  -> to change it, set the key
+      #   sequence -> to clear it, `!reset []`; to replace it, `!override [...]`
+      APP_VERSION: ${APP_VERSION:-1.0}
+    # `!reset []`, NOT `volumes: []`. Sequences APPEND when Compose merges, so a
+    # bare empty list appends nothing and therefore removes nothing - the dev
+    # override's `./api/app.py:/app/app.py:ro` bind mount would survive into
+    # "production" and you would be running host source instead of the image you
+    # tested. Silent, and exactly the kind of bug that reaches customers.
+    # `!reset` discards whatever earlier files set. Prove it:
+    #   docker compose -f docker-compose.yml -f docker-compose.override.yml \
+    #                  -f docker-compose.prod.yml config
+    volumes: !reset []             # no source bind mount: run what you shipped
+    # And the same for the dev override's direct-to-api port. Leaving it would
+    # publish the application past the proxy in production AND make `replicas: 3`
+    # below impossible - three containers cannot all bind host port 8000, which
+    # is the trap you met in lab 5.3.
+    ports: !reset []               # reach the api through the proxy, or not at all
     deploy:
       replicas: 3
       resources:
@@ -20,7 +43,11 @@ services:
     restart: always
 
   db:
-    ports: []                      # nothing published, at all
+    # Same trap, and here it is a security bug rather than a correctness one: a
+    # bare `ports: []` leaves the dev override's 127.0.0.1:5432 published, so
+    # "production" ships with the database reachable from the host - and Docker
+    # publishes past the firewall (week 7 3.3).
+    ports: !reset []               # nothing published, at all
     deploy:
       resources:
         limits: { memory: 512M }

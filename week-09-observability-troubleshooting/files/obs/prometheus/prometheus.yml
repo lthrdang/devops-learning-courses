@@ -6,6 +6,12 @@ global:
     cluster: lab
 
 rule_files:
+  # An ABSOLUTE path, resolved by whatever process reads this file. Inside the
+  # container the compose file mounts ./prometheus at /etc/prometheus, so it
+  # resolves. If you mount that directory somewhere else - say /p - when you
+  # run promtool by hand, this line still says /etc/prometheus and promtool
+  # fails to find the file. That is not promtool being fussy; it is what an
+  # absolute path means. Mount the directory where the config says it lives.
   - /etc/prometheus/alerts.yml
 
 scrape_configs:
@@ -17,7 +23,15 @@ scrape_configs:
 
   # node_exporter runs on the HOST OS, not in a container. That is deliberate:
   # a container sees a namespaced /proc and /sys, so host metrics gathered from
-  # inside one are subtly wrong. host.docker.internal resolves to the host.
+  # inside one are subtly wrong.
+  #
+  # host.docker.internal is how a container reaches the host - but it is NOT
+  # automatic on Docker Engine. It is a Docker Desktop feature (macOS and
+  # Windows), and on Linux the name simply does not resolve unless the service
+  # declares extra_hosts: ["host.docker.internal:host-gateway"]. It does, in
+  # docker-compose.yml; if you copy this scrape config into another stack and
+  # forget that line, this job goes DOWN with "dial tcp: lookup
+  # host.docker.internal" and stays there.
   - job_name: node
     static_configs:
       - targets: ["host.docker.internal:9100"]
