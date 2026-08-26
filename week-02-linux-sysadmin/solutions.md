@@ -160,7 +160,7 @@ sar -q -s 14:25:00 -e 14:40:00     # load;  -r memory, -u CPU, -b I/O
 # /etc/logrotate.d/labapp
 /var/log/labapp/*.log {
     daily
-    size 10M          # rotate on EITHER condition
+    maxsize 10M       # daily, AND early if it gets to 10M first - see below
     rotate 7
     compress
     delaycompress     # keep .1 uncompressed - it may still be being written
@@ -173,6 +173,10 @@ sar -q -s 14:25:00 -e 14:40:00     # load;  -r memory, -u CPU, -b I/O
     endscript
 }
 ```
+
+> **`maxsize`, not `size` — this is the trap the challenge was set to catch.** The requirement was "daily **and** when the file exceeds 10 MB", and `size 10M` does not mean that. `man logrotate` says `size` "is mutually exclusive with the time interval options, and it causes log files to be rotated **without regard for the last rotation time**". Put `size 10M` next to `daily` and the `daily` stops meaning anything: a log that never reaches 10 MB is never rotated at all, which is the exact opposite of what you asked for and the exact failure mode a size-based rule is supposed to prevent. `maxsize` is the directive that means "on the interval, or earlier if it grows past this" — with `maxsize`, logrotate considers both the size and the timestamp.
+>
+> The dry run is what catches this: `logrotate -d` prints its reasoning ("log does not need rotating" plus the criterion it applied), so you can see which of the two rules it is actually honouring before you trust the config for a year.
 
 ```bash
 sudo logrotate -d /etc/logrotate.d/labapp     # dry run first, always

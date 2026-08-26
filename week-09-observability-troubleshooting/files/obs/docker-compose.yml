@@ -42,6 +42,14 @@ services:
       # Anonymous viewing makes the lab easier; never do this in production.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Grafana's default console format is logfmt, like Prometheus's and
+      # Loki's. Switching it to JSON is a normal production choice - and it
+      # gives this stack a genuine JSON log producer, so `| json` in Loki has
+      # something real to parse. Lab 4.1b uses the contrast: the parser you
+      # write is a claim about the thing producing the lines, and `| json`
+      # against a logfmt producer fails SILENTLY.
+      GF_LOG_MODE: console
+      GF_LOG_CONSOLE_FORMAT: json
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafanadata:/var/lib/grafana

@@ -71,7 +71,6 @@ set -uo pipefail          # note: NOT -e. We want to keep testing after a failur
 
 HOST=${1:?usage: netdiag.sh HOST PORT}
 PORT=${2:?usage: netdiag.sh HOST PORT}
-FAILED_LAYER=0
 
 row() { printf '%-22s %-5s %s\n' "$1" "$2" "${3:-}"; }
 
@@ -138,26 +137,60 @@ elapsed_ms=$(( ($(date +%s%N) - start) / 1000000 ))
 if (( nc_rc == 0 )); then
   row "LAYER 4 (tcp/$PORT)" "OK" "connected in ${elapsed_ms}ms"
 else
-  # THE KEY BRANCH. Refused and timed out mean opposite things.
+  # THE KEY BRANCH. There are THREE outcomes here, not two, and they send you
+  # to three different places. Classify once, then report - an earlier version
+  # of this script had only two branches, so an ICMP admin-prohibited fell into
+  # the "else" and printed "TIMED OUT after 2ms ... packets are being DROPPED":
+  # a self-contradicting verdict (2ms is not a timeout) pointing at the wrong
+  # layer entirely.
+  #
+  #   refused    -> RST or ICMP port-unreachable. This host answered.
+  #   prohibited -> ICMP admin-prohibited / host-unreachable (EHOSTUNREACH).
+  #                 Something in the PATH answered. Fast, like a refusal.
+  #   dropped    -> silence until the timeout expired.
   if grep -qi 'refused' <<<"$nc_err"; then
-    row "LAYER 4 (tcp/$PORT)" "FAIL" "connection REFUSED after ${elapsed_ms}ms"
-    row "" "" "  -> the host is up and answered with RST. Routing and firewall are FINE."
-    row "" "" "  -> nothing is listening on $PORT, or it is bound to 127.0.0.1."
-    row "" "" "  -> next: on the server, ss -tlnp | grep $PORT"
+    outcome=refused
+  elif grep -qiE 'no route to host|unreachable' <<<"$nc_err"; then
+    outcome=prohibited
   else
-    row "LAYER 4 (tcp/$PORT)" "FAIL" "TIMED OUT after ${elapsed_ms}ms"
-    row "" "" "  -> no reply at all. Packets are being DROPPED."
-    row "" "" "  -> next: on the server, nft list ruleset; tcpdump -i any -n port $PORT"
+    outcome=dropped
   fi
+
+  case $outcome in
+    refused)
+      row "LAYER 4 (tcp/$PORT)" "FAIL" "connection REFUSED after ${elapsed_ms}ms"
+      row "" "" "  -> the host is up and answered with RST. Routing and firewall are FINE."
+      row "" "" "  -> nothing is listening on $PORT, or it is bound to 127.0.0.1."
+      row "" "" "  -> next: on the server, ss -tlnp | grep $PORT"
+      ;;
+    prohibited)
+      row "LAYER 4 (tcp/$PORT)" "FAIL" "HOST UNREACHABLE after ${elapsed_ms}ms"
+      row "" "" "  -> ICMP admin-prohibited/host-unreachable: something in the PATH said no."
+      row "" "" "  -> a router ACL, a cloud security group, or a firewall between us - not this"
+      row "" "" "     host's service, and not a silent drop. Note how FAST it came back."
+      row "" "" "  -> next: traceroute -T -p $PORT $IP; check security groups and router ACLs"
+      ;;
+    dropped)
+      row "LAYER 4 (tcp/$PORT)" "FAIL" "TIMED OUT after ${elapsed_ms}ms"
+      row "" "" "  -> no reply at all. Packets are being DROPPED silently."
+      row "" "" "  -> next: on the server, nft list ruleset; tcpdump -i any -n port $PORT"
+      row "" "" "  -> and on THIS host: nft list ruleset. tcpdump cannot show you an"
+      row "" "" "     outbound packet your own output chain dropped."
+      ;;
+  esac
   row "LAYER 7 (http)" "SKIP" "(transport failed)"
   echo
-  # "Refused" and "dropped" are NOT the same verdict. Saying "blocked" for a
-  # refusal sends the next person to the firewall, which is the wrong place.
-  if grep -qi 'refused' <<<"$nc_err"; then
-    echo "VERDICT: host reachable, NOTHING LISTENING on ${PORT}. Look at the service, not the network."
-  else
-    echo "VERDICT: reachable at layer 3, packets DROPPED at layer 4. Look at filtering, or the return path."
-  fi
+  # "Refused", "prohibited" and "dropped" are three different verdicts owned by
+  # three different people. Saying "blocked" for a refusal sends the next person
+  # to the firewall, which is the wrong place.
+  case $outcome in
+    refused)
+      echo "VERDICT: host reachable, NOTHING LISTENING on ${PORT}. Look at the service, not the network." ;;
+    prohibited)
+      echo "VERDICT: a firewall IN THE PATH rejected this. Look at network policy, not at the service." ;;
+    dropped)
+      echo "VERDICT: reachable at layer 3, packets DROPPED at layer 4. Look at filtering, or the return path." ;;
+  esac
   exit 4
 fi
 
@@ -180,6 +213,8 @@ fi
 - `set -uo pipefail` **without `-e`** — a diagnostic tool must keep going after a failure. This is one of the few places where omitting `-e` is correct, and it is deliberate.
 - The ICMP result is a `WARN`, never a `FAIL`. Treating ICMP as authoritative is the mistake this whole week is designed to cure.
 - Each failure prints **what it implies and what to check next**. A tool that says "FAIL" and stops has moved the work, not done it.
+- **Three layer-4 outcomes, not two.** The `prohibited` branch is the one people leave out, and leaving it out is worse than useless: an ICMP admin-prohibited reply lands in the `else`, and the tool confidently reports a "timeout" that arrived in 2ms and blames a silent drop. A diagnostic that is wrong is more expensive than no diagnostic, because someone will believe it.
+- **`nc`, not `curl`, for the layer-4 test.** curl reports all three outcomes as `Failed to connect ... Couldn't connect to server`. It cannot make this distinction, so it cannot be the thing that makes it.
 
 ---
 

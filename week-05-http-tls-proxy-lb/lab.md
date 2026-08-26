@@ -204,6 +204,15 @@ curl -sI http://app.lab.local/ | head -1     # 301 now, not 200
 curl -v https://app.lab.local/ 2>&1 | grep -E 'SSL|certificate|verify'
 ```
 
+The message is `curl: (60) SSL certificate problem: unable to get local issuer certificate` — and note what it is **not** telling you. That same string is what a server with a missing intermediate produces, which is the fault 3.5(d) stages later. Here nothing is wrong with the server at all: the chain is complete, and it is *you* who does not trust the CA. Count the certificates before you decide which of the two you have:
+
+```bash
+openssl s_client -connect app.lab.local:443 -servername app.lab.local </dev/null 2>/dev/null \
+  | grep -c '^ *[0-9] s:'          # 2 = leaf + intermediate, i.e. the server did its job
+```
+
+Two certificates and the error persists → the fix is on the **client**. One certificate where you expected two → the fix is on the **server**. Same message, opposite ends of the wire.
+
 Three ways to proceed, in increasing order of correctness:
 
 ```bash
@@ -223,12 +232,32 @@ openssl s_client -connect app.lab.local:443 -servername app.lab.local </dev/null
 openssl s_client -connect app.lab.local:443 -servername app.lab.local </dev/null 2>&1 | grep -E 'Protocol|Cipher|Verify'
 ```
 
-Compare with and without `-servername`, and against a real site:
+Two things that command does **not** do, and one it does for free:
 
 ```bash
+# (i) It does not verify the hostname. `Verify return code: 0 (ok)` only says
+#     the CHAIN is trusted - not that this certificate is for the name you asked
+#     about. Ask properly, then ask about a name that is not in the SAN list:
+openssl s_client -connect app.lab.local:443 -servername app.lab.local \
+  -verify_hostname app.lab.local </dev/null 2>/dev/null | grep -E 'Verification|Verify return'
+openssl s_client -connect app.lab.local:443 -servername app.lab.local \
+  -verify_hostname wrong.lab.local </dev/null 2>/dev/null | grep -E 'Verification|Verify return'
+
+# (ii) It does not need -servername here at all. Since OpenSSL 1.1.1, s_client
+#      sets SNI itself from -connect when that looks like a DNS name. Drop the
+#      flag from the first command and nothing changes. Now connect by IP, where
+#      SNI is NOT sent (RFC 6066 forbids a literal address in SNI). The server
+#      has to answer with its DEFAULT certificate, because you never told it
+#      which site you wanted:
+openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer
+
+# (iii) And against a real site, for contrast with a public chain:
 openssl s_client -connect example.com:443 -servername example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -subject -issuer -dates
 ```
+
+> The lab has only one `server` block on 443, so (ii) returns the same certificate either way — the point is *what was sent*, not what came back. `-servername` matters the moment a host serves more than one site, and that is exactly the situation you are usually debugging when you connect by IP to bypass DNS. Keep passing it; just know that the reason is "I am connecting to an address", not "s_client never sends SNI".
 
 ### 3.5 Break TLS on purpose — four experiments
 
@@ -269,8 +298,13 @@ sudo cp tls/app.lab.local.fullchain.crt /etc/nginx/tls/ && sudo systemctl reload
 ## Part 4 — HAProxy and health checks (Day 4)
 
 ```bash
+# Keep what you are about to destroy.
+sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.dist
 sudo cp ~/course/week-05-http-tls-proxy-lb/files/haproxy-lab.cfg /etc/haproxy/haproxy.cfg
+sudo diff /etc/haproxy/haproxy.cfg.dist /etc/haproxy/haproxy.cfg | head -40
 ```
+
+> **Read that diff.** Ubuntu's packaged `haproxy.cfg` is not empty boilerplate: it ships `chroot /var/lib/haproxy`, `ssl-default-bind-ciphers`, `ssl-default-bind-ciphersuites` and `ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets`. `sudo cp` over it discards every one of those in a single command, and nothing warns you — the service starts perfectly, one protection lighter. The lab config carries all four across deliberately; check that it does rather than taking this paragraph's word for it. **Whenever you replace a distro config wholesale, diff it first and carry the hardening over.** This is the same lesson as `-k`: the failure is silent, so you have to go looking.
 
 **Before you validate or start anything:** nginx already holds 80/443, and the shipped config binds `*:80`. Edit `bind *:80` → `bind *:8080` now.
 

@@ -109,8 +109,8 @@ done
 | Change | Config required for zero failures |
 |---|---|
 | **Image update** | `order: start-first`, a real `healthcheck`, `delay` > start_period + healthcheck settle, `parallelism: 1` |
-| **Config rotation** | same — configs are immutable, so a change *is* a rolling update |
-| **Secret rotation** | same, plus `target=` so the in-container path does not change |
+| **Config rotation** | same — **plus a versioned config `name:`**. Editing the file alone rotates nothing: the object is immutable and `docker stack deploy` exits 1 with `only updates to Labels are allowed`, leaving the service untouched. Bump `INDEX_VERSION` so a *new* object is created; that is the spec change `update_config` rolls |
+| **Secret rotation** | same, and the same versioned-name rule — plus `target=` so the in-container path does not change while the object name underneath it does |
 | **Drain a node** | `order: start-first` and **spare capacity**: with 3 replicas across 3 nodes and no headroom, draining one forces a rescheduling that cannot start-first |
 | **Hard node stop** | **Not achievable.** See below |
 

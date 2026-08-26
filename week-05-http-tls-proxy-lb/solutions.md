@@ -45,8 +45,12 @@ for i in $(seq 1 20); do curl -s localhost/ | jq -r .backend; done | sort | uniq
 curl -s localhost:9001/toggle >/dev/null
 curl -s localhost:9002/toggle >/dev/null
 
-# 5. WAIT for the health check to notice (inter * fall = 2s * 3 = 6s) PLUS the
-#    longest in-flight request. This wait is the entire point.
+# 5. WAIT for the health check to notice, PLUS the longest in-flight request.
+#    This wait is the entire point, and `inter * fall = 6s` is the FLOOR, not
+#    the answer: 6s is what it costs when the backend fails fast (measured
+#    worst case 5.8s on HAProxy 2.8). A backend that HANGS makes every probe
+#    time out before it counts as a failure - same numbers, ~10.5s measured.
+#    Hence 15, not 6.
 sleep 15
 
 # 6. Confirm zero traffic is reaching them, THEN remove from config and reload.
@@ -58,7 +62,7 @@ kill %1 %2
 
 **Where the failures come from if you get it wrong:**
 
-- Killing the old backend before the LB notices → every request routed to it in that window is a 502. With `inter 2s fall 3` that window is **6 seconds** of failures.
+- Killing the old backend before the LB notices → every request routed to it in that window is a 502. With `inter 2s fall 3` that window is **up to 6 seconds** of failures if the backend refuses connections outright — and **about 11** if it hangs instead, because a hung probe must time out before it counts as one of the three failures. Sizing a drain to exactly `inter × fall` is how you drop requests during a deploy that "waited for the health check".
 - `systemctl restart nginx` instead of `reload` → every in-flight connection is dropped at that instant.
 - Not waiting for in-flight requests after draining → a request that started before the drain and takes 20 seconds is killed at second 3.
 
@@ -183,11 +187,27 @@ Typical results on a 2-vCPU VM:
 | CPU per full handshake | — | ~1–2 ms (RSA-2048), ~0.3 ms (ECDSA-P256) |
 
 ```bash
+# FIRST - or you will benchmark the rate limiter instead of TLS.
+# `limit_req zone=perip burst=20 nodelay` keys on the client IP, and a load
+# generator is ONE client IP: past the first ~21 requests, everything is
+# rejected. Measured on the reference config: 60 sequential requests from one
+# IP produced 23 responses from the backend and 37 rejections.
+sudo sed -i 's/^\( *\)limit_req zone=perip/\1# limit_req zone=perip/' \
+  /etc/nginx/sites-available/lab.conf
+sudo nginx -t && sudo systemctl reload nginx
+
 sudo apt-get install -y apache2-utils
 ab -n 2000 -c 20 -k http://app.lab.local/
 ab -n 2000 -c 20 -k https://app.lab.local/
 ab -n 2000 -c 20    https://app.lab.local/     # no keep-alive - watch it collapse
+
+# RESTORE IT before C5.7, which measures the limiter on purpose.
+sudo sed -i 's/^\( *\)# limit_req zone=perip/\1limit_req zone=perip/' \
+  /etc/nginx/sites-available/lab.conf
+sudo nginx -t && sudo systemctl reload nginx
 ```
+
+> **Read `Non-2xx responses` before you believe any `ab` number.** A rate-limited benchmark reports a magnificent requests/sec figure for a server that is doing nothing but saying no — the rejections are cheap, so throughput goes *up* as usefulness goes to zero. The two challenges in this week cannot share one config: C5.5 needs the limiter out of the way, C5.7 needs it in the way. Notice that they conflict, and you have understood both.
 
 **The answer: no, "TLS is too slow" is not a real argument — but the reason is more specific than "hardware got faster".**
 

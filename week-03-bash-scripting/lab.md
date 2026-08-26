@@ -272,7 +272,6 @@ Description=Run the lab backup every 5 minutes
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
-Persistent=true
 RandomizedDelaySec=30
 [Install]
 WantedBy=timers.target
@@ -285,7 +284,9 @@ journalctl -u labbackup.service -n 20 --no-pager
 ls -l /opt/lab/backups
 ```
 
-> Notice that the script's stderr logging lands in the journal automatically, with timestamps and unit metadata. That is the payoff for logging to stderr rather than to a file of your own.
+> **No `Persistent=true` here, deliberately.** `man systemd.timer` says it "only has an effect on timers configured with `OnCalendar=`", and this timer has none. `Persistent=` catches up a run that a *wall-clock* schedule missed while the machine was off; `OnBootSec=`/`OnUnitActiveSec=` are monotonic — measured from boot and from the last activation — so there is no missed absolute time to catch up and the setting is silently inert. A real nightly backup would use `OnCalendar=*-*-* 03:00:00` **and** `Persistent=true`, so a laptop that was shut at 03:00 still gets its backup when it wakes. Copying `Persistent=` onto a monotonic timer is cargo cult: it costs nothing but it advertises a guarantee the unit does not provide.
+
+> Notice also that the timer and the service share a stem — `labbackup.timer` activates `labbackup.service` — and that the script's stderr logging lands in the journal automatically, with timestamps and unit metadata. That is the payoff for logging to stderr rather than to a file of your own.
 
 ---
 

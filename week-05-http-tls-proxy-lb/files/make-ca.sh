@@ -74,10 +74,19 @@ chmod 600 "${CN}.key"
 openssl req -new -key "${CN}.key" -subj "/C=VN/O=Lab/CN=${CN}" -out "${CN}.csr"
 
 # --- 4. the SAN extension --------------------------------------------------
-# MODERN CLIENTS IGNORE THE CN ENTIRELY. Only subjectAltName is consulted.
-# A certificate without a SAN is rejected by every current browser and by curl,
-# no matter how correct the CN looks. This is the #1 cause of "I made a cert and
-# it still says hostname mismatch".
+# BROWSERS IGNORE THE CN ENTIRELY. Only subjectAltName is consulted, and RFC
+# 9525 says the CN "MUST NOT be used to identify a service" - so a certificate
+# without a SAN is rejected by every current browser no matter how correct the
+# CN looks. This is the #1 cause of "I made a cert and it still says hostname
+# mismatch".
+#
+# YOUR TOOLS ARE MORE FORGIVING THAN YOUR USERS. OpenSSL's X509_check_host()
+# still falls back to the Subject CN when a certificate has no SAN at all,
+# unless the caller sets X509_CHECK_FLAG_NEVER_CHECK_SUBJECT - and curl does
+# not. A SAN-less cert from this CA returns HTTP 200 to curl and
+# "Verification: OK" to `openssl s_client -verify_hostname`. So "it works in
+# curl" proves nothing; ask the certificate instead:
+#     openssl x509 -in cert.crt -noout -ext subjectAltName
 #
 # DNS and IP entries are numbered in SEPARATE sequences - DNS.1, DNS.2, ... and
 # IP.1, IP.2, ... - because they are two independent lists. Sharing one counter

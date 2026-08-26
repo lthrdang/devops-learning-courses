@@ -58,6 +58,8 @@ mv "$tmp/out" /final/location
 
 **Bites when:** `process_data` fails — you publish an empty file to a location other systems read, which is worse than failing.
 
+**And one more, which the fixed version above still has:** `mktemp -d` puts `$tmp` in `/tmp`, while the destination is `/final/location`. If those are different filesystems — a tmpfs `/tmp`, a `TMPDIR` override, `PrivateTmp=true` in the unit file, a separate volume for `/final` — then `mv` cannot use `rename(2)`, gets `EXDEV`, and silently degrades to a streaming copy. The atomic publish you thought you had is a window during which a reader sees a short file. The fix is to stage *inside* the destination directory, so that the rename is same-filesystem by construction: `tmp=$(mktemp -d -p /final/location .staging.XXXXXX)`. `backup.sh` does exactly this, and the comment there explains why at length.
+
 ### D — the pipeline subshell
 
 `count` is incremented inside a subshell created by the pipe, so the parent still sees `0` and the alert never fires. Also `$count` is unquoted in `[ ]`, and `read line` should be `read -r line`.

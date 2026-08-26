@@ -3,8 +3,16 @@
 # pet (week 0).
 apiVersion: 1
 
+# PIN THE `uid`s. Grafana derives a uid when you leave it out, and dashboard
+# JSON references datasources BY UID, not by name. Leave them implicit and the
+# first dashboard you commit to ../dashboards/ works on your machine and breaks
+# on every rebuild elsewhere - the panels come back with "Datasource <uid> was
+# not found" and the graphs are empty. An explicit uid is a stable contract
+# between this file and every dashboard file - without it the comment above is
+# only half true, because the datasources rebuild and the dashboards do not.
 datasources:
   - name: Prometheus
+    uid: prometheus           # referenced as {"datasource":{"uid":"prometheus"}}
     type: prometheus
     access: proxy
     url: http://prometheus:9090
@@ -13,6 +21,7 @@ datasources:
       timeInterval: 15s        # match prometheus scrape_interval
 
   - name: Loki
+    uid: loki
     type: loki
     access: proxy
     url: http://loki:3100

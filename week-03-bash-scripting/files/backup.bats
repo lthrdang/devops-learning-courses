@@ -40,6 +40,9 @@ teardown() {
 
 @test "writes a matching sha256 sidecar" {
   archive="$("${SCRIPT}" -o "${DEST}" "${SRC}")"
+  # The sidecar is published BEFORE the archive, so if the archive is visible the
+  # sidecar is guaranteed to be too - a consumer watching for backup-*.tar.gz can
+  # never win a race against its own checksum file.
   [ -f "${archive}.sha256" ]
   # The sidecar records a bare filename, so the check has to run inside DEST -
   # but `( cd ... && run ... )` would set $status inside a subshell and then
@@ -105,18 +108,37 @@ teardown() {
   [ -f "${DEST}/backup-20260305-000000.tar.gz" ]
 }
 
-@test "leaves no temporary directory behind on success" {
-  before="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
+@test "leaves no staging directory behind on success" {
+  # The script stages inside DEST - not in /tmp - so that the publishing `mv` is
+  # always a same-filesystem rename. That means the cleanup assertion has to look
+  # where the staging directory actually is; a version of this test that counted
+  # /tmp/tmp.* would now pass unconditionally, and would keep passing with the
+  # EXIT trap deleted outright.
   "${SCRIPT}" -o "${DEST}" "${SRC}" >/dev/null
-  after="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
-  [ "$before" -eq "$after" ]
+  [ "$(find "${DEST}" -maxdepth 1 -name '.backup-staging.*' -type d | wc -l)" -eq 0 ]
 }
 
-@test "leaves no temporary directory behind on failure" {
-  before="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
-  run "${SCRIPT}" -o "${DEST}" "${TMP}/nope"
-  after="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
-  [ "$before" -eq "$after" ]
+@test "leaves no staging directory behind on failure" {
+  # The failure has to happen AFTER the staging directory exists, or the test
+  # proves nothing - a bad SOURCE is rejected by the preconditions long before
+  # anything is created. Make verification fail instead: the tar shim writes junk,
+  # the integrity check rejects it, and the script exits 3 from a point where the
+  # staging directory is live and only the EXIT trap can remove it.
+  mkdir -p "${TMP}/bin"
+  cat > "${TMP}/bin/tar" <<'SHIM'
+#!/usr/bin/env bash
+if [[ $1 == -czf ]]; then
+  printf 'not a gzip stream at all' > "$2"
+  exit 0
+fi
+exec /usr/bin/tar "$@"
+SHIM
+  chmod +x "${TMP}/bin/tar"
+  PATH="${TMP}/bin:${PATH}"
+
+  run "${SCRIPT}" -o "${DEST}" "${SRC}"
+  [ "$status" -eq 3 ]
+  [ "$(find "${DEST}" -maxdepth 1 -name '.backup-staging.*' -type d | wc -l)" -eq 0 ]
 }
 
 @test "a second concurrent run is refused by the lock" {

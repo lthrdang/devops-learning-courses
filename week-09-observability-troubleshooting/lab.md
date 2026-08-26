@@ -129,15 +129,16 @@ curl -s localhost:8000/another-random-url >/dev/null
 curl -s localhost:8000/metrics | grep '^http_requests_total{'
 ```
 
-Measured result — **five** series, despite five distinct URLs:
+Measured result — **four** series, from twenty-four requests across five distinct URLs:
 
 ```
-http_requests_total{method="GET",route="/flaky",status="200"}
-http_requests_total{method="GET",route="/items",status="200"}
-http_requests_total{method="GET",route="/items/:id",status="200"}     ← both IDs collapse here
-http_requests_total{method="GET",route="/metrics",status="200"}
-http_requests_total{method="GET",route="/other",status="404"}         ← both scans collapse here
+http_requests_total{method="GET",route="/items",status="200"} 20
+http_requests_total{method="GET",route="/items/:id",status="200"} 2   ← both IDs collapse here
+http_requests_total{method="GET",route="/metrics",status="200"} 1
+http_requests_total{method="GET",route="/other",status="404"} 2       ← both scans collapse here
 ```
+
+Count them against what you ran, and account for every one — this is the one exercise whose entire job is to leave you *confident* the instrumentation is right, so a series you cannot explain matters. Only three of those routes came from the commands above. **`/metrics` is there because of step 3.1**: you scraped it once to check the exposition format, and a scrape is a request like any other. (It reads `1`, not `2`, because the counter for the scrape you are reading right now is incremented *after* the response body has been rendered.) Skip 3.1 and you will see three series, which is equally correct.
 
 Now **break it deliberately.** Edit `route_of()` to `return path` and restart:
 
@@ -228,9 +229,79 @@ In Grafana → **Explore** → Loki datasource:
 {container=~".+"} |= "error"                         # substring filter
 {container=~".+", stream="stderr"}                   # stdout vs stderr
 {job="varlogs", filename="/var/log/auth.log"}        # host files, not containers
-{container="obs-loki-1"} | json | level="error"      # parse, then filter a field
+{container="obs-loki-1"} | logfmt | level="error"    # parse, then filter a field
+{container="obs-grafana-1"} | json | logger="provisioning.alerting"   # JSON producer
 sum by (container) (rate({container=~".+"}[5m]))     # a METRIC, out of logs
 ```
+
+### 4.1b Pick the parser to match the producer
+
+**Two of those queries do the same thing with different parsers, and swapping them gives you nothing — silently.** Run the wrong-parser version and look at what happens:
+
+```logql
+{container="obs-prometheus-1"}                       # 1. rows. good.
+{container="obs-prometheus-1"} | json                # 2. still rows! read on
+{container="obs-prometheus-1"} | json | __error__="" # 3. ZERO
+{container="obs-prometheus-1"} | json | level="error"# 4. ZERO
+{container="obs-prometheus-1"} | logfmt | level="ERROR"  # 5. rows
+```
+
+Measured against the live stack, Loki 3.7.6 (your absolute counts depend on how
+long the stack has been up and the range you select — what matters is which
+rows are **zero** and which are not, and that rows 1 and 2 are *identical*):
+
+| Query | Result |
+|---|---|
+| `{container="obs-prometheus-1"}` | N entries (37 in this run) |
+| `… \| json` | **the same N** — the parser failed but every line still came through |
+| `… \| json \| __error__=""` | **0** — not one of them actually parsed |
+| `… \| json \| level="error"` | **0** |
+| `… \| logfmt \| level="ERROR"` | the real error lines |
+
+Prometheus 3.x does not log JSON. It logs **logfmt**:
+
+```
+time=2026-08-26T03:29:34.371Z level=ERROR source=main.go:1389 msg="Error reloading config" err="..."
+```
+
+Loki's Go JSON parser is handed that, fails, and attaches an error label instead of dropping the line:
+
+```
+__error__="JSONParserErr"
+__error_details__="Value looks like object, but can't find closing '}' symbol"
+```
+
+> **Row 2 is the whole lesson.** `| json` did not error your query, did not turn the panel red, and did not return an empty screen — it returned *rows*, so everything looked fine. The failure only surfaced one stage later, when `| level="error"` filtered against a field that was never extracted and quietly matched nothing. **An empty result in Loki looks identical whether the label is wrong, the range is wrong, the parser is wrong, or the logs genuinely are not arriving.** That ambiguity is exactly why people conclude their log tooling is broken and go back to `grep`. `| __error__=""` (or `| __error__!=""` to see the casualties) is how you tell the four apart — make it the first thing you add when a parsed query comes back empty.
+
+**It fails in the other direction too, and just as quietly.** Grafana in this stack is configured with `GF_LOG_CONSOLE_FORMAT=json`, so it is a genuine JSON producer. Point the logfmt parser at it:
+
+| Query | Result |
+|---|---|
+| `{container="obs-grafana-1"} \| json \| logger="provisioning.alerting"` | rows (3 in this run) |
+| `{container="obs-grafana-1"} \| logfmt \| logger="provisioning.alerting"` | **0** |
+
+**One more thing you will trip over, and it is worth understanding rather than memorising.** Try this, with no parser at all:
+
+```logql
+{container="obs-grafana-1", level="error"}      # rows, with no parser at all
+{container="obs-prometheus-1", level="error"}   # 0 entries
+```
+
+`level` is doing double duty. `promtail.yml` has a `json:` pipeline stage that promotes a `level` field to a real stream **label** at ingest — so for JSON producers it is already there before you write any parser, and for logfmt producers the stage extracts nothing and the label is simply absent. That is why the Grafana example above filters on `logger` instead: `logger` is only ever a *parsed field*, so it tests the parser and nothing else. **Know which of the two you are filtering — a label filter and a parsed-field filter are written identically and behave completely differently**: labels are indexed and exist before the query runs, parsed fields are computed per line at query time and vanish if the parser fails.
+
+**And check the case while you are there.** Row 5 needs `level="ERROR"`, uppercase, because Prometheus 3.x logs Go `slog` levels in caps — `{container="obs-prometheus-1"} | logfmt | level="error"` returns **0 rows** against a container that is definitely logging errors. Loki's own logs, two containers away in the same stack, use lowercase `level=error`. Use `level=~"(?i)error"` if you need to span both, and never assume a field's *values* are normalised just because the field name is.
+
+**Three producers, three answers, one stack:**
+
+| Producer | Format | Parser |
+|---|---|---|
+| Prometheus 3.x, Loki, Promtail | logfmt (`level=INFO` / `level=error`) | `\| logfmt` |
+| Grafana, with `GF_LOG_CONSOLE_FORMAT=json` (set in `docker-compose.yml`) | JSON | `\| json` |
+| `metered.py` (week 6's habit) | JSON, lowercase `level` | `\| json` |
+
+> **`metered.py` is the honest asterisk on that table.** It really does emit JSON — read `log_message()` — but as Part 3 runs it, `python3 metered.py --port 8000 &` on the host, **its lines never reach Loki at all**. Promtail's `docker` job discovers containers, and its `varlogs` job reads only `/var/log/{syslog,auth.log,nginx/*.log}`. Check for yourself: `curl -s localhost:3100/loki/api/v1/label/container/values` lists containers only. So a query against it comes back empty — not because the parser is wrong, but because **the logs were never shipped**, which is the fourth cause of an empty screen from the box above and the one people diagnose last. If you want it in Loki, containerise it so `docker_sd_configs` finds it; a host process writing to a terminal is invisible to a log shipper no matter how beautifully structured its output is.
+
+That is the argument in `README.md` about structured logging, made concrete: `| json | status >= 500` is a real filter on a real field **only when the producer actually emits that field**. The parser is not a formality you bolt on to every query — it is a claim about the thing on the other end, and it is a claim you can be wrong about without being told.
 
 > **Every label in those queries came out of step 4.1** — you listed them before you queried them. Do that in the order shown. Guessing a label name gets you an empty result set, and an empty result set in Loki looks identical whether the label is wrong, the time range is wrong, or the logs genuinely are not arriving. Three very different problems, one identical screen.
 >
@@ -290,6 +361,23 @@ For each of the 8 rules in `alerts.yml`, answer:
 - What is its false-positive rate likely to be?
 
 Then propose one rule to **delete** and one to **add**. Deleting is harder and more valuable.
+
+**Then look hard at `HighLatency`, because it carries the scars of getting this wrong.** It used to aggregate with `sum by (le)` and no filter. Run both versions against the traffic you generated in 3.3 and compare:
+
+```promql
+# the OLD expression: every route of every job blended into one distribution
+histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+
+# the CURRENT expression, per route
+histogram_quantile(0.99,
+  sum by (job, route, le) (rate(http_request_duration_seconds_bucket{route!="/slow"}[5m])))
+```
+
+> The blended number was measured at **3.22** on this lab's own synthetic load — over the 2s threshold, at `severity: page`, with nothing wrong. `/slow` is doing exactly what it was written to do and it pages you for it. That is the false positive. The false *negative* is quieter and worse: a p99 computed across all traffic cannot be moved by an endpoint serving 1% of it, so a genuinely broken route stays invisible behind healthy volume from everything else. **A global p99 is not a summary of your service, it is a summary of your traffic mix** — and the traffic mix changes without you.
+
+**Now the question that exclusion is hiding.** `route!="/slow"` is honest here because `/slow` is a test fixture. But suppose `/slow` were real — a report export that legitimately takes six seconds, and whose users are perfectly happy about that. You cannot exclude it (nobody would notice when it broke) and you cannot hold it to 2s (it would page forever). Write down what you would actually do.
+
+There is no expression that solves this, and that is the point: you have hit the limit of what a single global threshold can express. The answer is a **per-route latency objective** — `/api/items` 200ms, `/reports/export` 10s — recorded as data rather than hard-coded in a rule, with the alert comparing each route against *its own* budget. Once you are writing that down you have started writing SLOs, and the follow-on question ("how much of the month's budget has this burned?") is what error-budget burn-rate alerting answers. **That is challenge C9.1 this week** — do it after this lab, with this question fresh.
 
 ### 5.3 Prove that an alert can fire — the audit nobody does
 

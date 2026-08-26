@@ -33,6 +33,22 @@ That is not hypothetical — it is a well-documented class of real incident.
 - to the left of `&&` or `||`: `cmd || true`
 - negated: `! cmd`
 - anywhere except the last command in a pipeline (that is what `pipefail` fixes)
+- **hidden behind a declaration**: `local x=$(cmd)`, `declare x=$(cmd)`, `export x=$(cmd)`. A bare `x=$(false)` *does* abort — the assignment's status is the substitution's status. But `local`, `declare`, `export` and `readonly` are *builtin commands*, and the status you get is the **builtin's** (it succeeded in declaring the variable), not the command substitution's, which is thrown away. Since §3.1 below tells you to use `local` for every variable inside a function, this one is aimed squarely at you: `local out=$(curl -sf "$url")` swallows a failed download and carries on with an empty string. shellcheck flags it as **SC2155**. The fix is to split the two statements, so the assignment stands alone: `local out; out=$(curl -sf "$url")`.
+- **the entire body of a function called from a condition**. This is the nastiest of the lot, because it is not one command that gets a pass — it is everything. When bash suspends `set -e` for a command in a condition, and that command happens to be a *function*, the suspension applies to every line the function runs:
+
+```bash
+set -e
+f() { false; echo "STILL RUNNING"; }
+if f; then echo "...and the if says f succeeded"; fi
+```
+
+Run it. It prints `STILL RUNNING`, then `...and the if says f succeeded`, and exits 0.
+
+  `f` does not stop at the `false`; it runs to the end, and its exit status is whatever the *last* command returned — so the `if` is testing something unrelated to the failure. Any function you intend to error-check must therefore return deliberately (`cmd || return 1`) rather than leaning on `set -e` to unwind it for you.
+
+What is **not** an exception, despite being widely believed: `set -e` *is* inherited by subshells. `( false; echo unreachable )` under `set -e` aborts the subshell at the `false`, and the failed subshell then aborts the parent. Do not write defensive code for a problem you do not have.
+
+Verify every one of these yourself rather than taking the list on faith — that is a five-minute experiment and it is the difference between knowing the rule and having read the rule.
 
 ### `set -u` — error on undefined variable
 
@@ -172,7 +188,7 @@ done < "$file"
 - `IFS=` — do not strip leading/trailing whitespace
 - `-r` — do not interpret backslashes
 - `"$line"` quoted — no splitting
-- `printf` not `echo` — `echo` mangles anything starting with `-` or containing `\`
+- `printf` not `echo` — `echo` mangles anything starting with `-`, which it eats as an option (`echo "-n"` prints nothing at all). The backslash half of the folklore is worth getting right: **bash's builtin `echo` and GNU coreutils `echo` do not expand `\n` by default** — you need `-e` or `shopt -s xpg_echo` for that. But `dash`'s `echo` does expand it unconditionally, and `/bin/sh` is `dash` on Debian and Ubuntu, so the same script is portable-looking and behaves differently depending on which shell runs it. That is the real argument: `echo`'s behaviour is *implementation-defined*, so a line that is correct here is not necessarily correct on the next box. `printf '%s\n' "$var"` is specified, and it does the same thing everywhere.
 
 **Never `for line in $(cat file)`.** It splits on whitespace, not newlines, and globs the result.
 
@@ -217,6 +233,8 @@ A Bash function "returns" an exit status (0–255), not a value. Data comes back
 
 `local` for every variable inside a function. Without it, everything is global and functions silently clobber each other.
 
+With one caveat you have already met on Day 1: `local x=$(cmd)` is a *declaration*, and under `set -e` you get the declaration's exit status, not `cmd`'s — the failure vanishes and `x` is quietly empty. Whenever the right-hand side is a command substitution whose failure matters, split it: `local x; x=$(cmd)`. shellcheck's SC2155 exists to catch exactly this.
+
 ### 3.2 Argument parsing
 
 For a few flags, `getopts` is built in and sufficient:
@@ -241,8 +259,25 @@ while getopts ':vo:h' opt; do
   esac
 done
 shift $((OPTIND - 1))
-source=${1:?$(usage 1)}
+
+# Check the positional argument explicitly, with two lines that do what they say.
+(( $# == 1 )) || usage 1
+source=$1
 ```
+
+**Why not the clever one-liner?** `source=${1:?$(usage 1)}` looks like it collapses the check and the error message into one expression, and it is the version you will see in other people's scripts. Run it with no arguments and here is what you actually get:
+
+```
+Usage: prog [-v] SOURCE
+q.sh: line 7: 1:
+```
+
+Two things went wrong, and neither announces itself:
+
+- **The message bash prints is empty.** `${var:?message}` prints whatever *message* expands to. `usage` writes its text to **stderr**, and a command substitution only captures **stdout** — so *message* expands to the empty string and bash emits `line 7: 1:` with a dangling colon and nothing after it. The usage text above it appeared only by luck: the subshell inherited your stderr and wrote straight to the terminal, bypassing the capture entirely. Redirect the script's stderr, or write `usage` to stdout instead, and the diagnostic changes completely — which is a strong hint that the construct is not doing what it looks like it is doing.
+- **The `exit 1` never runs your script.** It exits the *subshell* the command substitution created. Your script's exit status comes from bash's own `:?` handling, which happens to also be 1 — so the bug is invisible until the day you want a different exit code, and then the `1` you carefully passed to `usage` is silently ignored.
+
+`backup.sh` in `files/` uses the explicit form for exactly these reasons. Clever is not the same as correct, and in error paths — the code that only ever runs on your worst day — correct is the only thing that matters.
 
 `getopts` handles short flags only. If you need `--long-options`, that is a signal to consider Python (Week 6).
 
@@ -335,11 +370,14 @@ Testing the **failure** paths matters more than the success path. Anyone can mak
 Any script that deletes, deploys or modifies should support a dry run:
 
 ```bash
+DRY_RUN=${DRY_RUN:-0}        # NOT optional - see below
 run() {
     if (( DRY_RUN )); then info "DRY-RUN: $*"; else "$@"; fi
 }
 run rm -rf "$olddir"
 ```
+
+**That first line is load-bearing, and leaving it out is the single most common way this pattern is shipped broken.** Under the `set -u` this page told you to set at the top of every script, `(( DRY_RUN ))` on an unset variable is not "false" — it is `DRY_RUN: unbound variable` and an immediate abort, from inside a helper whose whole job is to make dangerous operations safe. `${DRY_RUN:-0}` at the top of the script gives it a definite value while still letting a caller override it from the environment (`DRY_RUN=1 ./deploy.sh`), and the `-n` flag in your `getopts` loop can set it too.
 
 This turns "I think this will do the right thing" into "here is exactly what it will do", which is what you want before running something as root at 3am.
 

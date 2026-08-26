@@ -200,6 +200,17 @@ docker service update --secret-rm db_password --secret-add source=db_password_v2
 
 The `target=` keeps the in-container path stable so the application needs no change. Rotation is therefore a rolling update — which means it is zero-downtime, and also that you must have a healthcheck for it to be safe.
 
+**Configs work the same way, and this is where a stack file will surprise you.** `docker stack deploy` does **not** version a config for you. Edit the file behind a plain `configs: { web_index: { file: ./index.html } }`, re-deploy, and the daemon rejects the write — `only updates to Labels are allowed` — the command exits **1**, and the running service is left exactly as it was. Nothing rotated. The name is the only thing Swarm compares, so put the version *in the name*:
+
+```yaml
+configs:
+  web_index:
+    name: web_index_${INDEX_VERSION:-v1}    # bump this to rotate
+    file: ./index.html
+```
+
+A new name is a new object, a new object is a change to the service spec, and *that* is what rolls. The old object is not garbage-collected — `docker config rm` it once nothing references it (Swarm refuses while a service still does). Lab 3.3b walks through both halves.
+
 ### 4.3 Placement
 
 ```bash

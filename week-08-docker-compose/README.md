@@ -175,6 +175,21 @@ environment:
 
 `:?` makes Compose refuse to start with a clear message. `:-` supplies a default. Use `:?` for anything without a safe default — **failing at `compose up` is enormously better than starting a service with an empty password.**
 
+**The colon is not decoration.** There are four forms, not two, and the colon is what decides whether *set but empty* counts as missing:
+
+| Form | `FOO` unset | `FOO=` (set, empty) | `FOO=bar` |
+|---|---|---|---|
+| `${FOO:-default}` | `default` | **`default`** | `bar` |
+| `${FOO-default}` | `default` | **`""`** | `bar` |
+| `${FOO:?msg}` | **errors** | **errors** | `bar` |
+| `${FOO?msg}` | **errors** | **`""`** | `bar` |
+
+Measured with `EMPTY=` exported: `${EMPTY:-fallback}` resolves to `fallback`, `${EMPTY-fallback}` resolves to the empty string. Same split for `:?` versus `?`.
+
+This bites exactly one person, and it is always the same person: the one who wrote `POSTGRES_PASSWORD=` in `.env` — a line left half-finished, or a CI system that exports every variable whether it has a value or not. With `${POSTGRES_PASSWORD?...}` Compose is perfectly happy, because the variable *is* set, and the database comes up with an empty password. With `${POSTGRES_PASSWORD:?...}` it refuses.
+
+> **Use the colon forms unless you have a specific reason not to.** Reach for the bare `-` / `?` only when empty is a meaningful value you deliberately want to pass through — a flag you want to blank out, say. Otherwise treat "set to nothing" as "not set", because that is what the human meant.
+
 ### 3.3 The Postgres password trap
 
 This one catches nearly everyone, and it is fault #1 in this week's drill:
@@ -306,7 +321,9 @@ The hard part is that **the stack really is healthy**. Work out how a green heal
 
 ## Recommended reading
 
-- Compose specification — <https://github.com/compose-spec/compose-spec/blob/master/spec.md>
+- Compose specification — <https://github.com/compose-spec/compose-spec/blob/main/spec.md> (the spec is now a numbered set of files; two you will want directly)
+  - Merge and override rules — <https://github.com/compose-spec/compose-spec/blob/main/13-merge.md>
+  - Interpolation, including `:-` versus `-` — <https://github.com/compose-spec/compose-spec/blob/main/12-interpolation.md>
 - Docker Compose docs — <https://docs.docker.com/compose/>
 - Awesome Compose (real examples) — <https://github.com/docker/awesome-compose>
 - *Twelve-Factor App* — <https://12factor.net/> — especially III (Config) and IX (Disposability)

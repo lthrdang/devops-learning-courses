@@ -139,16 +139,55 @@ if (( DRY_RUN == 0 )); then
 fi
 
 # --- do the work ---------------------------------------------------------
-WORKDIR=$(mktemp -d)
+# WHY THE STAGING DIRECTORY LIVES UNDER ${DEST} AND NOT IN /tmp.
+#
+# The publish step below is a rename, and the reason it is a rename is that
+# rename(2) is atomic: a consumer polling ${DEST} sees the archive either not at
+# all or complete, never half-written. But that guarantee has a precondition -
+# rename(2) only works WITHIN A SINGLE FILESYSTEM. Across filesystems the kernel
+# returns EXDEV, and `mv` quietly falls back to open-create-copy-unlink: a
+# streaming copy, during which the destination path exists and is short. Every
+# property we wanted is gone, and nothing warns you, because `mv` still exits 0.
+#
+# A bare `mktemp -d` puts the staging area in ${TMPDIR:-/tmp}, and ${DEST} is
+# caller-supplied via -o. Assuming those share a filesystem is a bet you lose
+# routinely: TMPDIR set to a scratch volume; a tmpfs /tmp (the default on many
+# images); systemd's PrivateTmp=true, which this course TEACHES in week 2 as
+# baseline unit hardening and which gives the service a private /tmp on its own
+# mount; an NFS or separate volume mounted at the backup target; /opt on its own
+# LV. Any one of them silently downgrades the atomic publish to a visible copy.
+#
+# Worse, the failure is not merely non-atomic. If the process is killed mid-copy,
+# the EXIT trap removes WORKDIR but the truncated file already sitting at ${FINAL}
+# is not WORKDIR's - it survives, it matches the retention glob, and the next run
+# counts that corpse as a good backup and prunes a real one to make room for it.
+#
+# Staging inside ${DEST} removes the whole class of problem by construction: the
+# staging directory and the final path are on the same filesystem BECAUSE the
+# staging directory is inside the final path's directory. The leading dot keeps it
+# out of casual `ls`, and the name deliberately does not match the retention glob
+# 'backup-*.tar.gz', so a concurrent run's retention pass can never see it.
+#
+# The cost is that ${DEST} must hold the archive twice for a moment. That is the
+# correct trade: transient double space is a capacity problem you can measure,
+# and a half-published backup is a correctness problem you discover during a
+# restore.
 STAMP=$(date +%Y%m%d-%H%M%S)
 NAME="backup-${STAMP}.tar.gz"
-STAGING="${WORKDIR}/${NAME}"
 FINAL="${DEST}/${NAME}"
+
+if (( DRY_RUN )); then
+  # Nothing is created in a dry run - not even the staging directory - so ${DEST}
+  # may not exist yet (the mkdir above was itself dry-run'd). Name a plausible
+  # path purely so the log lines below read like the real thing.
+  WORKDIR="${DEST}/.backup-staging.XXXXXX"
+else
+  WORKDIR=$(mktemp -d -p "${DEST}" .backup-staging.XXXXXX)
+fi
+STAGING="${WORKDIR}/${NAME}"
 
 info "archiving ${SOURCE} -> ${FINAL}"
 
-# Build into a temporary file, then move into place. A consumer must never see
-# a half-written archive, and mv within one filesystem is atomic.
 # -C makes the stored paths relative, so a restore does not try to recreate
 # /opt/lab/data/... from the filesystem root.
 src_parent=$(dirname -- "${SOURCE}")
@@ -178,10 +217,16 @@ if (( DRY_RUN == 0 )); then
   size=$(stat -c%s "${STAGING}")
   info "verified: ${entries} entries, ${size} bytes"
 
-  mv -- "${STAGING}" "${FINAL}"
-  # A checksum next to the archive lets a future restore prove the file is
-  # intact without unpacking it.
-  ( cd "${DEST}" && sha256sum "${NAME}" > "${NAME}.sha256" )
+  # A checksum next to the archive lets a future restore prove the file is intact
+  # without unpacking it - so it is written BEFORE the archive is published, and
+  # published first. Order matters: a consumer that spots backup-*.tar.gz appearing
+  # and immediately reaches for the sidecar must never lose that race. The cd makes
+  # sha256sum record a bare filename, which is what `sha256sum -c` wants when it is
+  # run later from inside ${DEST}.
+  ( cd "${WORKDIR}" && sha256sum "${NAME}" > "${NAME}.sha256" )
+
+  mv -- "${STAGING}.sha256" "${FINAL}.sha256"
+  mv -- "${STAGING}" "${FINAL}"        # the atomic publish - same filesystem, always
 fi
 
 # --- retention -----------------------------------------------------------

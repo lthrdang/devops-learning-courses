@@ -154,7 +154,11 @@ sudo logrotate -d /etc/logrotate.d/nginx     # -d = DEBUG: show what it WOULD do
 sudo logrotate -f /etc/logrotate.d/nginx     # force now
 ```
 
-The subtlety: after renaming `access.log` to `access.log.1`, the running nginx still holds a file descriptor to the *renamed* file and keeps writing there. The new `access.log` stays empty and disk is never freed. That is what the `postrotate` script solves — it signals the process to reopen its files:
+The subtlety: a process holds an open file by *inode*, not by name. After `access.log` is renamed to `access.log.1`, the running nginx still holds a file descriptor to that same inode and keeps writing to it — so new lines land in `access.log.1` and the freshly created `access.log` stays permanently empty. Nothing has leaked *yet*: `access.log.1` is still a name on disk, and `ls` shows it growing.
+
+The disk leak arrives one rotation later. When logrotate reaches its `rotate N` limit and **deletes** a generation that nginx still has open, the last directory entry goes away but the inode does not — the kernel cannot free the blocks while a descriptor references them. Now you have a file consuming gigabytes that no path points at, `du` cannot see it, `df` insists the disk is full, and the only tools that can find it are `lsof +L1` (link count below 1) and `/proc/<pid>/fd`. That is the classic "the disk is full but nothing is on it" page, and you will build one deliberately in the lab.
+
+Both problems have the same root cause and the same fix — make the process reopen its files, which is what the `postrotate` script is for:
 
 ```
 postrotate
@@ -162,7 +166,17 @@ postrotate
 endscript
 ```
 
-Or `copytruncate`, which copies then truncates in place — simpler, but loses any lines written between the two operations. Knowing why both exist is the point.
+Or `copytruncate`, which copies the file aside then truncates the original in place, so the descriptor stays valid and pointed at the same (now empty) inode. Simpler, requires nothing of the application — but it loses any lines written between the copy and the truncate, and it briefly doubles the file's disk usage. Knowing why both exist is the point.
+
+**`size`, `minsize`, `maxsize` — three words that do not mean the same thing**, and picking the wrong one produces a config that looks right, passes review, and silently stops rotating. From `man logrotate`:
+
+| directive | meaning | interaction with `daily`/`weekly`/… |
+| --- | --- | --- |
+| `size 10M` | rotate whenever the file exceeds 10 MB, **ignoring the last rotation time** | **mutually exclusive** — it *replaces* the time interval |
+| `minsize 10M` | rotate on the interval, but **skip** it if the file is still under 10 MB | interval still applies; size is a floor |
+| `maxsize 10M` | rotate on the interval, **or earlier** if the file passes 10 MB | interval still applies; size is a ceiling |
+
+So "rotate daily and also if it gets big" is `daily` + **`maxsize`**. Writing `daily` + `size` instead disables the daily rotation entirely, and a log that never reaches the threshold is never rotated at all — which is precisely the unbounded-growth outage the whole section exists to prevent. Prove which rule is in force with `logrotate -d`; it prints the criterion it applied for every file it considered.
 
 ---
 
@@ -179,12 +193,22 @@ dpkg -L nginx                             # every file this package installed
 dpkg -S /etc/nginx/nginx.conf             # which package owns this file?  ← very useful
 sudo apt-get remove nginx                 # binaries go, config stays
 sudo apt-get purge nginx                  # config goes too
-apt-mark hold docker-ce                   # pin: refuse to upgrade it
+apt-mark hold docker-ce                   # hold: refuse to upgrade it
 ```
 
 `dpkg -S` is the one juniors never learn and seniors use weekly: given a mystery file, find out what put it there.
 
-**Repositories and keys.** A third-party repo is two things: a `.list`/`.sources` entry under `/etc/apt/`, and a GPG key that authenticates it. If either is wrong you get `NO_PUBKEY` or `Release file is not valid yet` — the latter usually meaning **your clock is wrong**, which is a wonderfully confusing failure mode and a fault in the Week 12 game day.
+**A hold is not a pin**, even though the two get used interchangeably in conversation and the distinction matters the moment something is stuck. A **hold** is a dpkg *selection state* on the package — a flag meaning "do not change this", full stop. **Pinning** is an apt *priority* rule written into `/etc/apt/preferences.d/`, which says which candidate version apt should prefer, and can therefore hold a package at a specific version, downgrade it, or prefer one repository over another. They are different mechanisms, stored in different places, and you inspect them with different commands:
+
+```bash
+apt-mark showhold                          # which packages are held?
+apt-mark unhold docker-ce                  # release one
+apt-cache policy docker-ce                 # installed / candidate / per-repo priorities
+```
+
+If a package refuses to upgrade and `apt-mark showhold` is empty, the answer is in `apt-cache policy` — a pin somewhere is giving the version you want a priority it cannot win with. Read `man 5 apt_preferences` before writing one; the priority numbers have specific meanings (`< 0` never install, `100` installed-version-only, `> 1000` allow downgrades) and guessing produces a machine whose upgrade behaviour nobody can explain.
+
+**Repositories and keys.** A third-party repo is two things: a `.list`/`.sources` entry under `/etc/apt/`, and a GPG key that authenticates it. If either is wrong you get `NO_PUBKEY` or `Release file is not valid yet` — the latter meaning **your clock is behind the repository's**, so apt sees an index dated in its future and refuses it. Note the direction: a clock running *fast* produces no complaint at all, because a `Release` file dated in the past is entirely normal. The tolerance is `Acquire::Max-FutureTime`, ten seconds by default. It is a wonderfully confusing failure mode and a fault in the Week 12 game day.
 
 ### 3.2 Users and services
 
@@ -255,10 +279,22 @@ ls /etc/cron.d/ /etc/cron.daily/           # system-wide
 0 3 * * * /usr/bin/env bash /opt/lab/backup.sh >> /var/log/backup.log 2>&1
 ```
 
-**systemd timers** are the modern replacement and are better in ways that matter:
+**systemd timers** are the modern replacement and are better in ways that matter — but first, the structural fact the examples usually leave implicit.
+
+A timer is **half** of the arrangement. It has no `ExecStart=` of its own; all it does is activate another unit on a schedule — and by default that unit is the `.service` with the **same stem**. `backup.timer` activates `backup.service`, and if `backup.service` does not exist you get a timer that fires correctly, forever, into nothing. `man systemd.timer` documents the override as `Unit=` in the `[Timer]` section, for the cases where you want a different name. So you always write two files:
 
 ```ini
-# /etc/systemd/system/backup.timer
+# /etc/systemd/system/backup.service   <- the WORK. No [Install] section: the
+[Unit]                                 #    timer starts it, nothing else needs to.
+Description=Nightly backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/backup.sh -o /srv/backups /srv/data
+```
+
+```ini
+# /etc/systemd/system/backup.timer     <- the SCHEDULE. This is the unit you enable.
 [Unit]
 Description=Nightly backup
 
@@ -266,15 +302,28 @@ Description=Nightly backup
 OnCalendar=*-*-* 03:00:00
 Persistent=true          # if the machine was off at 03:00, run it at next boot
 RandomizedDelaySec=300   # jitter, so 500 machines do not stampede a server at once
+# Unit=something-else.service   <- only if the stems differ. Usually they should not.
 
 [Install]
 WantedBy=timers.target
 ```
 
+`Persistent=true` is meaningful **here** precisely because the schedule is a wall-clock one. It only works with `OnCalendar=` — `man systemd.timer` says so in as many words — because it operates by stamping the last trigger time on disk and comparing it against the calendar at boot. On a monotonic timer (`OnBootSec=`, `OnUnitActiveSec=`) there is no absolute time that could have been missed, so the setting does nothing at all; you will still see it copied onto them constantly.
+
 ```bash
-systemctl list-timers --all
-systemd-analyze calendar "*-*-* 03:00:00"    # verify a schedule before trusting it
+sudo systemctl daemon-reload
+sudo systemctl enable --now backup.timer     # enable the TIMER, never the service
+systemctl list-timers --all                  # the ACTIVATES column names the service
+systemctl show backup.timer -p Unit          # ...or ask the timer directly
+systemd-analyze calendar "*-*-* 03:00:00"    # when does this expression actually fire?
+systemd-analyze verify /etc/systemd/system/backup.service   # is the unit itself sane?
 ```
+
+Three different questions, three different tools, and it is worth knowing which answers which:
+
+- **`systemd-analyze calendar`** evaluates an `OnCalendar=` expression and prints the next occurrences. Use it before trusting any schedule you did not copy from something already working — the syntax is more forgiving than you expect and `Mon *-*-* 9:00` is not the mistake you will make, `*-*-1 03:00:00` is.
+- **`systemd-analyze verify`** parses a unit and reports what systemd itself would silently ignore: unknown key names (a typo in `Persistant=` is accepted and dropped without a word) and, for services, an `ExecStart=` whose binary is missing or not executable — it exits non-zero for that one. Point it at the **`.service`**; running it against the `.timer` will *not* tell you the service is missing, because it does not follow the activation link.
+- **`systemctl list-timers`** is what actually proves the two halves are wired together: its `ACTIVATES` column names the unit each timer will start. A timer whose service does not exist still enables, still schedules, still shows up here — and fails at every trigger with `Failed to start ... not found` in the journal. That is the failure this section exists to stop you shipping, and `list-timers` plus one `journalctl -u backup.service` after the first firing is how you catch it.
 
 Timers win because: the job's output goes to the journal automatically, it inherits all the `[Service]` hardening and resource limits, `Persistent=` handles missed runs, and `RandomizedDelaySec=` prevents thundering herds. Cron gives you none of that.
 

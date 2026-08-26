@@ -1,6 +1,13 @@
-<!-- Served by the `web` service via a docker config. Editing this file and
-     re-deploying demonstrates config rotation: configs, like secrets, are
-     IMMUTABLE, so `docker stack deploy` creates a new one and rolls the
-     service - which is why the healthcheck matters even for a static file. -->
+<!-- Served by the `web` service via a docker config.
+     Editing this file is NOT enough to roll the service. A swarm config object
+     is immutable, and `docker stack deploy` does not version it for you: with a
+     plain `configs: { web_index: { file: ./index.html } }` a re-deploy after an
+     edit FAILS with
+         only updates to Labels are allowed
+     and the running service is left untouched. That is why `stack.yml` gives
+     this config an explicit versioned `name:`. To roll a content change you
+     bump INDEX_VERSION, which creates a NEW config object, which changes the
+     service spec, which is what triggers the rolling update - and which is why
+     the healthcheck matters even for a static file. See lab 3.3. -->
 <h1>lab web</h1>
 <p>version 1</p>

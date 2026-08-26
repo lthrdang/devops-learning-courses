@@ -160,7 +160,7 @@ time nc -vz -w5 beta 9999        # refused, immediately
 
 Clean up on `beta`: `sudo nft delete table inet lab`
 
-### 2.3 TCP states
+### 2.3 TCP states — and which machine ends up in TIME_WAIT
 
 On `beta`: `python3 -m http.server 8080 --bind 0.0.0.0 &`
 On `alpha`:
@@ -170,11 +170,40 @@ ss -tn state established
 curl -s http://beta:8080/ >/dev/null
 ss -tn | head
 for i in $(seq 1 50); do curl -s http://beta:8080/ >/dev/null; done
-ss -tn state time-wait | wc -l          # TIME_WAIT accumulating
+```
+
+Now count `TIME_WAIT`. **On both machines.** Do not skip either one — the whole point of this exercise is the difference between them.
+
+```bash
+# on alpha (the client that made all 50 requests)
+ss -tn state time-wait | tail -n +2 | wc -l
+
+# on beta (the server)
+ss -tn state time-wait | tail -n +2 | wc -l
+ss -tn state time-wait | head                 # keep the header - read Local Address:Port
 ss -s
 ```
 
-> Explain in your logbook why `TIME_WAIT` exists at all, and what would go wrong without it.
+> **`tail -n +2` is not cosmetic.** `ss` prints its column header even when a state filter matches nothing at all, so a bare `ss -tn state time-wait | wc -l` is always exactly one too high — it reports `1` for zero sockets. That off-by-one is small enough to survive a code review and big enough to make an empty result look like a real one.
+
+Alpha shows roughly nothing. Beta is full of them, and every one has **beta's own port 8080 as the local address**. Write down why you think that is before you read on.
+
+> **The rule: `TIME_WAIT` belongs to whoever sends the first `FIN`** — the side performing the *active close*. `python3 -m http.server` speaks HTTP/1.0 and closes the connection after every single response, so in this lab the **server** is the one hanging up, and the server is the one that pays. Count on the client, find nothing, and you conclude `TIME_WAIT` is a myth — which is exactly the wrong lesson, and a very common one.
+>
+> Keep the diagnostic, because it works everywhere: **"which side has the `TIME_WAIT`s?" answers "who is hanging up?"** A load balancer stacked with `TIME_WAIT` toward a backend is a load balancer that is not reusing connections. A database server stacked with them means your pool is not pooling. It is a free answer, on a live system, to a question that otherwise needs a packet capture.
+
+Now go looking for the knobs everyone tells you to turn — on `beta`:
+
+```bash
+sysctl net.ipv4.tcp_fin_timeout      # exists, and has NOTHING to do with TIME_WAIT
+sysctl net.ipv4.tcp_tw_reuse         # exists: client-side only, defaults to 2 (loopback only)
+sysctl net.ipv4.tcp_tw_recycle       # ERROR - this one was removed from the kernel
+sysctl -a 2>/dev/null | grep -i timewait
+```
+
+That last one is a trap worth walking into: the only hits are `nf_conntrack_*_timeout_timewait`, which are the **connection tracker's** idea of how long to remember a flow — a completely different subsystem from the TCP socket state, and changing them does nothing to a `TIME_WAIT` socket. There is no sysctl for the TIME_WAIT duration. The 60 seconds is `TCP_TIMEWAIT_LEN`, compiled into the kernel. Read §2.3 of the README for what each of those knobs actually does, then note in your logbook which of them you have seen recommended as a "TIME_WAIT fix".
+
+> Explain in your logbook why `TIME_WAIT` exists at all, and what would go wrong without it — and why the fix for `TIME_WAIT` pressure is keep-alive rather than any of the sysctls above.
 
 ### 2.4 Privileged ports
 

@@ -180,8 +180,83 @@ lab_agent.0.xxx@node1  | 2026-08-24T08:23:52+00:00 agent on 8e27b66ed866
 ```bash
 curl -s http://node1:8080/            # served from the docker config
 docker config ls
-docker config inspect lab_web_index --format '{{.Spec.Name}}'
+docker config inspect web_index_v1 --format '{{.Spec.Name}}'
 ```
+
+### 3.3b Rotating a config — and the thing every tutorial gets wrong
+
+The story you will read everywhere is: *configs are immutable, so editing the
+file and re-deploying makes Swarm create a new one and roll the service.* **Try
+it and it does not happen.** Prove it to yourself before you learn the fix —
+temporarily delete the `name:` line from the `configs:` block in `stack.yml`,
+re-deploy to create the un-versioned object, then edit `files/index.html` and
+deploy again:
+
+```bash
+sed -i 's|version 1|version 2|' files/index.html
+docker stack deploy -c stack.yml lab; echo "exit=$?"
+```
+
+```
+failed to update config lab_web_index: Error response from daemon: rpc error:
+code = InvalidArgument desc = only updates to Labels are allowed
+exit=1
+```
+
+> **Immutable means immutable.** The object refuses the write, `docker stack
+> deploy` exits **1**, and the service is not touched at all — `curl` still
+> returns `version 1` and `docker service ps lab_web` shows no new task. There
+> is no auto-versioning. Nothing rotated. If you had run that deploy from CI
+> and only checked that the *service* was healthy, you would have concluded the
+> change shipped.
+
+The fix is to make the config **name** carry the version, which is why
+`stack.yml` declares `name: web_index_${INDEX_VERSION:-v1}`. Put that line back,
+reset the page to where it started, and rotate properly:
+
+```bash
+# undo the failed attempt: restore the `name:` line in stack.yml, and
+sed -i 's|version 2|version 1|' files/index.html
+docker stack rm lab && sleep 10 && docker config rm lab_web_index
+docker stack deploy -c stack.yml lab          # creates web_index_v1
+
+# NOW rotate
+sed -i 's|version 1|version 2|' files/index.html
+INDEX_VERSION=v2 docker stack deploy -c stack.yml lab
+
+docker config ls                      # BOTH objects now exist
+docker service ps lab_web             # a new task; the old one Shutdown
+curl -s http://node1:8080/            # version 2
+```
+
+```
+ID             NAME           CREATED
+qgh8iklnxrn5   web_index_v1   33 seconds ago
+u69mforhxbbj   web_index_v2   15 seconds ago
+```
+
+A new *name* is a new object, a new object is a change to the service spec, and
+a change to the service spec is what `update_config` rolls. Nothing about the
+file's *contents* is involved.
+
+Now clean up the orphan — Swarm will not do it for you:
+
+```bash
+docker config rm web_index_v1         # succeeds: nothing references it
+docker config rm web_index_v2         # FAILS: in use by service lab_web
+```
+
+```
+Error response from daemon: rpc error: code = InvalidArgument desc = config
+'web_index_v2' is in use by the following service: lab_web
+```
+
+> **Two habits come out of this.** Version the *name* of every config and every
+> secret — `app_config_v3`, `db_password_2026_08` — because that is the only
+> thing Swarm will act on. And garbage-collect: every rotation leaves the
+> previous object behind forever, and the in-use check above is exactly what
+> makes that safe to automate. The same reasoning applies verbatim to secrets,
+> which is why C10.1 asks you to rotate one.
 
 ---
 

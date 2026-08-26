@@ -40,6 +40,15 @@ scrape_configs:
     pipeline_stages:
       # If the app logs JSON (week 6), promote a couple of fields to labels
       # and leave the rest queryable in the line itself.
+      #
+      # This stage is BEST-EFFORT and that is deliberate: docker_sd matches
+      # every container on the host, and most of them (Prometheus, Loki,
+      # promtail itself) log logfmt, not JSON. For those the json stage
+      # extracts nothing, the `level` label is simply absent, and the line
+      # ships unchanged - it does NOT drop the line or fail the pipeline. So
+      # `{container="obs-prometheus-1", level="error"}` returns nothing while
+      # the errors are right there in the line. Parse at QUERY time with the
+      # parser that matches the producer (`| logfmt`); see lab 4.1b.
       - json:
           expressions: { level: level }
       - labels: { level: }

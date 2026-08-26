@@ -149,8 +149,12 @@ rate(http_requests_total[5m])
 sum(rate(http_requests_total{status=~"5.."}[5m]))
   / sum(rate(http_requests_total[5m]))
 
-# p99 latency from a histogram
+# p99 latency from a histogram - `le` is mandatory, but rarely sufficient
 histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+
+# ...and the version you almost always want instead: per route, per job
+histogram_quantile(0.99,
+  sum by (job, route, le) (rate(http_request_duration_seconds_bucket[5m])))
 
 # CPU utilisation from node_exporter (note: measure IDLE and subtract)
 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
@@ -163,6 +167,8 @@ predict_linear(node_filesystem_avail_bytes{mountpoint="/"}[6h], 4*3600) < 0
 ```
 
 **`rate()` on counters, always.** A counter only increases and resets to zero on restart. The raw number is meaningless; the rate of change is the signal. `rate()` also handles the resets for you, which is why hand-computing deltas is wrong.
+
+**`sum by (le)` is the minimum, not the answer.** You must keep `le` — `histogram_quantile` needs the whole bucket ladder and gets nonsense without it — but keeping *only* `le` blends every route and every job into a single distribution. That single number then fails in both directions: one slow batch endpoint drags it over the threshold and pages you for a service nobody is complaining about, while a genuinely broken endpoint serving 1% of traffic cannot move a percentile computed across the other 99%, so it stays invisible. A global p99 is a summary of your *traffic mix*, and the traffic mix changes without you. **Aggregate by the dimensions you would want named in the page** — usually `job` and `route` — and add `le` to that list. This week's `alerts.yml` carries the scar; lab 5.2 measures it.
 
 That last query is worth dwelling on. `predict_linear` alerts on **"you will have a problem"** rather than **"you have a problem"** — a disk alert at 80% is arbitrary and fires constantly on a large disk that is filling slowly; an alert that says "full in 4 hours at the current rate" is actionable every time it fires.
 
@@ -253,6 +259,8 @@ sum(rate({service="api"} |= "error" [5m])) by (level)
 ```
 
 **This is why structured logging (Week 6) matters.** `| json | status >= 500` is a real filter on a real field. Against free-form text you would be writing a regex against an English sentence that someone will reword next sprint.
+
+**But the parser is a claim about the producer, and you can be wrong about it silently.** `| json` against a service that logs **logfmt** — which is what Prometheus, Loki, Promtail and stock Grafana all do — parses nothing. It does not error and it does not empty your result: the lines still come through, carrying a hidden `__error__="JSONParserErr"` label, and the failure only shows up one stage later when `| level="error"` filters on a field that was never extracted and matches zero rows. An empty screen in Loki looks the same whether the label is wrong, the time range is wrong, the parser is wrong, or the logs are genuinely not arriving — four very different problems. Match the parser to the format (`| logfmt` for logfmt, `| json` for JSON, `| pattern` / `| regexp` for neither), and when a parsed query comes back empty add `| __error__=""` before you start doubting the pipeline. Lab 4.1b measures all of this against the live stack.
 
 ---
 
