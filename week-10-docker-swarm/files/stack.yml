@@ -9,7 +9,12 @@
 #   1. `build:` is IGNORED. Swarm deploys images; build and push first.
 #   2. `depends_on` is IGNORED. There are NO start-order guarantees at all.
 #      Your application must retry - week 8's advice becomes mandatory here.
-#   3. `deploy:` is honoured (and ignored by plain `docker compose up`).
+#   3. `deploy:` is honoured HERE - but it is NOT simply "ignored by compose",
+#      which is the folklore. Compose v2 applies `deploy.replicas` and
+#      `deploy.resources.limits` itself (week 8's stack relies on the memory
+#      limit being real). What only Swarm can act on is the cluster-only
+#      subset below: `placement`, `update_config`, `rollback_config`,
+#      `endpoint_mode`, and swarm `restart_policy` semantics.
 # ---------------------------------------------------------------------------
 
 services:
@@ -121,6 +126,23 @@ networks:
 
 configs:
   web_index:
+    # THE VERSIONED NAME IS LOAD-BEARING. Swarm config objects are IMMUTABLE,
+    # and `docker stack deploy` does NOT version them for you. Without this
+    # `name:`, the object is created once as `lab_web_index` and every later
+    # deploy after an edit to index.html exits 1 with
+    #
+    #   failed to update config lab_web_index: Error response from daemon:
+    #   rpc error: code = InvalidArgument desc = only updates to Labels are
+    #   allowed
+    #
+    # - and the running service is not touched, so nothing rolls. (Measured on
+    # Docker 29.1.3.) With an explicit versioned name, bumping INDEX_VERSION
+    # creates a NEW object, which changes the service spec, which is what
+    # triggers the rolling update. Note that `name:` is used VERBATIM: Swarm
+    # does not prefix it with the stack name the way it does `lab_web_index`.
+    # The old object is left behind on purpose - `docker config rm` it once no
+    # service references it. See lab 3.3.
+    name: web_index_${INDEX_VERSION:-v1}
     file: ./index.html
 
 secrets:

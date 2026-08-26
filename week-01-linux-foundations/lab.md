@@ -269,7 +269,15 @@ cat > /opt/lab/w01/graceful.sh <<'EOF'
 cleanup() { echo "$(date -Is) caught SIGTERM, cleaning up" >> /tmp/graceful.log; exit 0; }
 trap cleanup TERM
 echo "$(date -Is) started pid=$$" >> /tmp/graceful.log
-while true; do sleep 1; done
+# `sleep 1 & wait $!` rather than a plain `sleep 1`, and the reason is the whole
+# reason this exercise works at all. Bash does not run a trap handler while it is
+# waiting on a FOREGROUND child - it defers the handler until that child exits.
+# With a plain `sleep 1` the handler therefore fires up to a full second after the
+# signal arrives, which is long enough for the next line of this lab to read the
+# log before anything has been written to it, and you would conclude SIGTERM
+# behaves exactly like SIGKILL. `wait` is different: it is interruptible, so the
+# signal breaks it immediately and the handler runs at once.
+while true; do sleep 1 & wait $!; done
 EOF
 chmod +x /opt/lab/w01/graceful.sh
 
@@ -281,6 +289,8 @@ sleep 1; kill -9 "$P"; sleep 1; cat /tmp/graceful.log      # note what is MISSIN
 ```
 
 > This is the whole argument against reflexive `kill -9`, and it is also exactly what happens to a container that ignores `docker stop`.
+
+**Prove the `wait` detail to yourself**, because it is the kind of thing you will only believe once you have watched it fail. Change the loop back to `while true; do sleep 5; done`, send SIGTERM one second in, and time how long the handler takes to write its line — it will be about four seconds, the remainder of the `sleep`. Change it back to `sleep 5 & wait $!` and the handler runs within milliseconds. A real service that gets this wrong appears to ignore SIGTERM entirely, systemd's `TimeoutStopSec=` expires, and systemd escalates to SIGKILL — so the "graceful" shutdown path you wrote never runs in production even though it works when you test it by hand.
 
 ### 4.5 Resources
 

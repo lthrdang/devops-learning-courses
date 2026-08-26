@@ -126,7 +126,12 @@ markdown_extensions:
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  - pymdownx.smartsymbols
+  # pymdownx.smartsymbols is DELIBERATELY NOT ENABLED. It rewrites (c) into a
+  # copyright sign, and this course labels steps (a) (b) (c) (d) all over the
+  # place - "Experiment (c) goes backwards on purpose" rendered as "Experiment
+  # (c)" with a copyright symbol until this was removed. It does the same to
+  # (tm), (r), -->, =/= and +/-, every one of which is ordinary technical
+  # notation here. Prettier quotes are not worth corrupting the text.
   - pymdownx.caret
   - pymdownx.mark
   - pymdownx.tilde
@@ -137,6 +142,9 @@ exclude_docs: |
   .gitignore
   mkdocs.yml
   Makefile
+  # A point-in-time engineering review of this course, not course content.
+  # Kept in the repo as the record of what was fixed and what is still open.
+  REVIEW-2026-08.md
   # The rendered site is bind-mounted back into the repo, so from
   # inside the container it also appears under docs_dir. MkDocs has
   # no way to detect that, so exclude it or the build eats itself.

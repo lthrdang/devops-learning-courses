@@ -222,7 +222,45 @@ docker compose -f docker-compose.yml config | grep -E 'APP_VERSION'         # ba
 docker compose -f docker-compose.yml -f docker-compose.prod.yml config | grep -A4 volumes
 ```
 
-> Note that the prod overlay sets `volumes: []` and **replaces** the list rather than removing one entry. Lists are replaced wholesale; maps are merged. Confirm this yourself with `docker compose config`.
+> The prod overlay uses `volumes: !reset []`, and the tag is the whole point. **Sequences APPEND when Compose merges them** — they are not replaced. A bare `volumes: []` would append nothing, remove nothing, and leave the dev bind mount in place. Mappings merge key by key; scalars are replaced. `command`, `entrypoint` and `healthcheck.test` are the three documented sequence exceptions and *are* overridden wholesale. Confirm all of it with `docker compose config` — spec: <https://github.com/compose-spec/compose-spec/blob/main/13-merge.md>
+
+### 5.1a Prove it — sequences append, and `!reset` is what actually removes
+
+The command in 5.1 merges only **base + prod**, and the base has no `volumes:` on `api` and no `ports:` on `db`. That hides the bug. Merge all **three** files, the way a careless `docker compose -f ... up` in CI would:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.prod.yml config \
+  | grep -E -A4 'api:|volumes:|ports:|published'
+```
+
+Now break it deliberately and diff the two:
+
+```bash
+sed -e 's/volumes: !reset \[\]/volumes: []/' -e 's/ports: !reset \[\]/ports: []/' \
+    docker-compose.prod.yml > /tmp/prod-noreset.yml
+
+docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.prod.yml config > /tmp/with-reset.txt
+docker compose -f docker-compose.yml -f docker-compose.override.yml -f /tmp/prod-noreset.yml config > /tmp/without-reset.txt
+diff /tmp/with-reset.txt /tmp/without-reset.txt
+```
+
+The diff shows exactly what the empty list failed to remove:
+
+```
+>       - type: bind
+>         source: /opt/lab/w08/stack/api/app.py
+>         target: /app/app.py
+>         read_only: true
+...
+>       - mode: ingress
+>         host_ip: 127.0.0.1
+>         target: 5432
+>         published: "5432"
+```
+
+> **Read that again.** With `volumes: []` and `ports: []`, your "production" configuration runs **host source code instead of the image you tested**, and **publishes the database**. Both files parse, `docker compose config` exits 0, nothing warns you. This is the single most valuable thing in Part 5: an override that looks like it removes something and does not.
+>
+> The other tag is `!override` — use it when you want to *replace* a list rather than clear it: `cap_add: !override [SYS_PTRACE]` gives you only `SYS_PTRACE`, where a plain `cap_add: [SYS_PTRACE]` would give you the base's capabilities as well.
 
 ```bash
 # 5.2 Profiles
@@ -327,6 +365,10 @@ make snapshot VM=dock NAME=pre-w08
 make break VM=dock DRILL=08-compose STACK=/opt/lab/w08/stack
 ```
 
-Symptom: *"Every container shows Up, the API answers on :8080, and every request returns 500. It worked before the weekend."*
+Symptom: *"Everything is Up and healthy and the site works - `curl :8080` returns 200 - but the nightly migration job has failed every night since the weekend with `password authentication failed for user postgres`, and I can't `psql` in with the password in `secrets/db_password.txt` any more either."*
 
-Note the symptom says **500**, not 503. Given what you learned in Part 3, what does that tell you before you run a single command?
+Note what the symptom does **not** say: nothing is down, nothing returns 500, and `docker compose ps` is entirely green. Before you run a single command, answer this - Parts 3 and 4.4 gave you everything you need:
+
+**How can this stack report `healthy` while the database is rejecting logins?** Look at what `app.py`'s probe actually does, then ask which component in the whole stack genuinely authenticates. Then ask what rewriting `secrets/db_password.txt` does - and does not - change about a database that already exists.
+
+> A healthcheck only ever proves that *the code path it exercises* works. This one opens a TCP socket to `db:5432` and stops. Green means the port is open. It has never said anything about credentials, and it never will.

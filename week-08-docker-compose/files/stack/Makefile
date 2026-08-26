@@ -9,7 +9,27 @@ init:  ## create .env and the secret file
 > @test -f .env || cp .env.example .env
 > @mkdir -p secrets
 > @test -f secrets/db_password.txt || { openssl rand -base64 24 | tr -d '\n' > secrets/db_password.txt; echo "generated secrets/db_password.txt"; }
-> @chmod 600 secrets/db_password.txt
+# Protect the DIRECTORY, not the file. 0700 on secrets/ stops every other
+# unprivileged user on the host from even listing what secrets exist, and the
+# Docker daemon runs as root so it traverses the directory regardless.
+> @chmod 700 secrets
+# 644 - and yes, that is deliberate. Read this before you "fix" it back to 600.
+#
+# A Compose `file:` secret is a plain BIND MOUNT of the host file. The uid, gid
+# and mode you see on the host are exactly what the container sees; nothing is
+# copied and nothing is re-owned. api/Dockerfile runs as USER appuser (uid
+# 10001), which matches neither your uid nor root, so with mode 0600 the open()
+# in app.py:_secret() raises PermissionError at import, the healthcheck never
+# passes, and the whole stack aborts with
+#   "dependency failed to start: container stack-api-1 is unhealthy".
+#
+# The `uid:`, `gid:` and `mode:` sub-options that would fix this are SWARM-ONLY
+# - Compose parses them and silently ignores them for file-based secrets. So on
+# a single host you get exactly two choices: run the container as the uid that
+# owns the file, or make the file world-readable. Week 10's Swarm secrets are
+# the real answer: they are mounted from tmpfs with the uid/gid/mode you ask
+# for, so the secret can be 0400 root-owned and still readable by uid 10001.
+> @chmod 644 secrets/db_password.txt
 
 up: init  ## start the stack (dev)
 > docker compose up -d --build

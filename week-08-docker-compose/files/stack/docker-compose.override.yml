@@ -4,12 +4,33 @@
 # Compose merges this on top of docker-compose.yml AUTOMATICALLY, with no
 # flags. That is why `docker compose up` in dev differs from what you deploy.
 #
-# MERGE SEMANTICS, which surprise people:
-#   scalars  -> replaced
-#   maps     -> merged key by key
-#   lists    -> REPLACED WHOLESALE, not appended
-# So the `ports:` list below replaces the base list entirely.
+# MERGE SEMANTICS, which surprise people - and which most people remember
+# BACKWARDS. Straight from the Compose Specification (13-merge.md):
+#   scalars    -> replaced
+#   maps       -> merged key by key, the override winning per key
+#   sequences  -> APPENDED. You get the base list PLUS this one.
+#
+# So the `ports:` list below does NOT replace the base list - it adds to it.
+# api has no `ports:` in the base, so that is invisible here; db does not
+# either. Where you CAN see it: base `cap_add: [NET_ADMIN]` plus an override
+# `cap_add: [SYS_PTRACE]` gives you BOTH capabilities, not the second one.
+#
+# `ports:`, `volumes:`, `secrets:` and `configs:` append but de-duplicate on a
+# unique key first - the container path for a volume, the target/published/
+# protocol triple for a port - so re-mounting something at the same path
+# replaces just that entry.
+#
+# THE EXCEPTIONS, all documented: `command`, `entrypoint` and
+# `healthcheck.test` are overridden wholesale. Concatenating half of one
+# command line onto half of another is never what anyone wants.
+#
+# To actually REMOVE what the base set, an empty list is useless - appending
+# nothing removes nothing. You need the tags: `!reset []` to clear a value,
+# `!override [...]` to replace a list instead of appending to it. See
+# docker-compose.prod.yml, which needs both of those to be a real prod config.
+#
 # Verify with: docker compose config
+# Spec: https://github.com/compose-spec/compose-spec/blob/main/13-merge.md
 # ---------------------------------------------------------------------------
 
 services:

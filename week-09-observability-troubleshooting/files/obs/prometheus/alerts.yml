@@ -26,16 +26,47 @@ groups:
           runbook: "https://wiki.internal/runbooks/high-error-rate"
 
       - alert: HighLatency
+        # NOTE THE `sum by (job, route, le)`, AND THE EXCLUSION.
+        #
+        # This rule used to read `sum by (le) (...)`, with no route filter. That
+        # collapses every route of every job into one blended distribution, and
+        # it is wrong twice over:
+        #
+        #   1. FALSE POSITIVES. One slow batch endpoint drags the global p99
+        #      over the line and pages for a service nobody is complaining
+        #      about. Measured in this very lab: `/slow` draws from a
+        #      log-normal with a tail out to 8s, and the lab's own load
+        #      generator was enough to push the blended p99 to 3.22 - the rule
+        #      went `pending` on synthetic traffic, at severity `page`.
+        #   2. FALSE NEGATIVES, which are worse. A genuinely broken endpoint
+        #      serving 1% of traffic cannot move a p99 computed across the
+        #      other 99%. The alert stays green while that endpoint is down.
+        #
+        # Aggregate by the dimensions you care about AND `le` - `le` because
+        # histogram_quantile needs the whole bucket ladder, and job/route
+        # because that is the granularity at which "is this slow?" is a
+        # meaningful question. The rule now fires per route and the label tells
+        # you which one, so the annotation can name it.
+        #
+        # `/slow` is excluded because in this lab it is a deliberate latency
+        # generator, not a user-facing endpoint - alerting on it would be
+        # alerting on the test fixture. See lab 5.2 for the question that
+        # exclusion should make you ask.
         expr: |
           histogram_quantile(0.99,
-            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 2
+            sum by (job, route, le) (
+              rate(http_request_duration_seconds_bucket{route!="/slow"}[5m])
+            )
+          ) > 2
         for: 10m
         labels: { severity: page }
         annotations:
-          summary: "p99 latency is {{ $value | humanize }}s"
+          summary: "p99 for {{ $labels.route }} ({{ $labels.job }}) is {{ $value | humanize }}s"
           description: "Alerting on p99, not the average: an average of 250ms can
             hide 1% of users waiting 20 seconds, and if a page makes 50 calls
-            then a 1% tail is most page loads."
+            then a 1% tail is most page loads. Alerting PER ROUTE, not globally,
+            because a single blended p99 both fires for the wrong service and
+            hides a broken one behind healthy volume."
 
       - alert: ServiceDown
         # `up` is synthesised by Prometheus itself: the scrape IS the health
@@ -89,11 +120,41 @@ groups:
     rules:
       - alert: ContainerRestartLoop
         # The week-7 crash loop that `docker ps` hides by showing "Up 3 seconds".
-        expr: rate(container_start_time_seconds[15m]) > 0
-        for: 15m
+        #
+        # This rule used to read `rate(container_start_time_seconds[15m]) > 0`,
+        # which looks obviously right and is a category error. Two reasons:
+        #
+        #   1. container_start_time_seconds is a GAUGE holding a unix
+        #      timestamp. `rate()` is for COUNTERS. Point it at a timestamp and
+        #      it dutifully divides "the start time jumped forward 200s" by the
+        #      900s window and hands you 0.22 - a number in units of seconds
+        #      per second that means nothing. Measured on a real crash loop
+        #      with 4 restarts, it returned 0.219; on a SINGLE restart it also
+        #      returns something greater than zero. `> 0` therefore does not
+        #      distinguish a loop from one ordinary redeploy, which is the only
+        #      thing the alert was supposed to do.
+        #   2. It is also fragile in the other direction. A restart sometimes
+        #      lands in a NEW series - cAdvisor keys containers by cgroup, and
+        #      a new cgroup means a new series whose value is flat from birth,
+        #      so rate() over it is 0 and the restart vanishes entirely.
+        #
+        # `changes()` is the right primitive for a gauge: it counts how many
+        # times the value CHANGED inside the window, which for a start-time
+        # gauge is exactly "how many times did this container start". Summing
+        # by name covers reason 2 as well, because changes(...[15m]) is a range
+        # selector and so still matches series that have since gone stale.
+        # Measured: 0 for all twelve healthy containers, 5 for a container
+        # crash-looping with a docker RestartCount of 4.
+        expr: |
+          sum by (name) (
+            changes(container_start_time_seconds{name!=""}[15m])
+          ) > 2
+        for: 5m
         labels: { severity: ticket }
         annotations:
-          summary: "{{ $labels.name }} keeps restarting"
+          summary: "{{ $labels.name }} restarted {{ $value }} times in 15m"
+          description: "A crash loop. `docker ps` shows it Up a few seconds and
+            looks healthy; `docker ps -a` and the RestartCount are the evidence."
 
       - alert: ContainerOOMKilled
         expr: increase(container_oom_events_total[10m]) > 0

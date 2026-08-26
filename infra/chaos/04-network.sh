@@ -67,11 +67,20 @@ cat <<'MSG'
 
   SYMPTOM REPORTED BY THE USER
   ----------------------------
-  "From alpha I can ping beta, so the network is obviously fine. But
-   curl http://beta:8080 just hangs and eventually times out."
+  "From alpha I can ping beta's IP address just fine, so the network is
+   obviously up. But curl http://beta:8080 just hangs and eventually times
+   out. ping beta by name gets nothing either - I assume ICMP is filtered
+   for hostnames or something. Can someone open port 8080 on the firewall?"
 
-  Reproduce it:   ping -c2 beta
+  Get beta's real address from `multipass list` on the host first.
+
+  Reproduce it:   ping -c2 <BETA_IP>            # replies - this is the lie
+                  ping -c2 beta                 # does NOT reply. why not?
+                  getent hosts beta             # compare with <BETA_IP>
                   curl -m 5 -v http://beta:8080/ ; echo "exit=$?"
-                  curl -m 5 -v http://localhost:8080/ ; echo "exit=$?"
+                  curl -m 5 -v http://<BETA_IP>:8080/ ; echo "exit=$?"
+
+  The reporter's own two lines contradict each other, and the diagnosis in
+  the last sentence is wrong. Find the contradiction before you touch nft.
 
 MSG

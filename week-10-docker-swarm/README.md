@@ -52,9 +52,19 @@ A **service** is the declaration. A **task** is one instance of it — a slot th
 | `--mode replicated --replicas 5` | five tasks, anywhere the constraints allow |
 | `--mode global` | exactly one task on **every** eligible node — for agents: log shippers, node_exporter, monitoring |
 
-Task states you must be able to read: `NEW → PENDING → ASSIGNED → PREPARING → STARTING → RUNNING`, and the terminal ones `COMPLETE`, `FAILED`, `SHUTDOWN`, `REJECTED`.
+Task states you must be able to read, in order:
 
-> **`PENDING` means the scheduler could not place it.** Not "starting soon" — *could not place*. `docker service ps <svc> --no-trunc` gives the reason, and `--no-trunc` is essential because the default truncation cuts off the useful half of the message.
+`NEW → PENDING → ASSIGNED → ACCEPTED → READY → PREPARING → STARTING → RUNNING`
+
+and the terminal ones: `COMPLETE`, `FAILED`, `SHUTDOWN`, `REJECTED`, `ORPHANED`, `REMOVE`.
+
+Three of those are worth knowing before you meet them:
+
+- **`ACCEPTED`** — the assigned node's agent has taken the task. The handover from scheduler to agent succeeded.
+- **`ORPHANED`** — the node running the task has been unreachable for long enough that the manager has given up on hearing from it. The task is *presumed* dead but cannot be confirmed, because the only machine that knows is the one that stopped answering. **This is what you will see in Part 5 of the lab** after you stop a node — not `FAILED`, and not `SHUTDOWN`.
+- **`REMOVE`** — the task is being torn down after a scale-down or a service removal.
+
+> **`PENDING` is a normal transient state**, not an error: every task passes through it on its way to being placed, usually in milliseconds. What *is* diagnostic is a task **stuck** in `PENDING` — that means the scheduler has looked at every node and placed it nowhere. `docker service ps <svc> --no-trunc` gives the reason (`no suitable node (…)`), and `--no-trunc` is essential because the default truncation cuts off the useful half of the message. The distinction that actually matters is `PENDING` versus `REJECTED`: `PENDING` means no node was *chosen*, `REJECTED` means a node was chosen and its agent could not start the container.
 
 ---
 
@@ -170,7 +180,7 @@ A stack file is a Compose file plus a `deploy:` section. Differences from Compos
 
 - **`build:` is ignored.** Swarm deploys images; it does not build them. You must build and push to a registry first. This surprises everyone migrating from Compose.
 - **`depends_on` is ignored.** There are no start-order guarantees at all. Your application must retry — Week 8's lesson, now mandatory rather than merely wise.
-- `deploy:` is honoured (it is ignored by plain `docker compose up`).
+- **`deploy:` is honoured — but so is part of it under plain `docker compose up`, which is not what most people are told.** Compose v2 reads `deploy.replicas` and `deploy.resources.limits` and applies them: measured on Docker 29.1.3, `replicas: 2` starts two containers and `limits.memory: 64M` produces `MemLimit=67108864` on the container. Week 8's own `docker-compose.yml` depends on exactly that. What Compose ignores is the **cluster-only subset**, because it has no cluster to apply it to: `placement`, `update_config`, `rollback_config`, `endpoint_mode`, and Swarm's `restart_policy` semantics (Compose uses the top-level `restart:` key instead). Do not assume a `deploy:` block is inert outside Swarm — check with `docker compose config` and `docker inspect`.
 
 ### 4.2 Secrets and configs
 
@@ -190,6 +200,17 @@ docker service update --secret-rm db_password --secret-add source=db_password_v2
 
 The `target=` keeps the in-container path stable so the application needs no change. Rotation is therefore a rolling update — which means it is zero-downtime, and also that you must have a healthcheck for it to be safe.
 
+**Configs work the same way, and this is where a stack file will surprise you.** `docker stack deploy` does **not** version a config for you. Edit the file behind a plain `configs: { web_index: { file: ./index.html } }`, re-deploy, and the daemon rejects the write — `only updates to Labels are allowed` — the command exits **1**, and the running service is left exactly as it was. Nothing rotated. The name is the only thing Swarm compares, so put the version *in the name*:
+
+```yaml
+configs:
+  web_index:
+    name: web_index_${INDEX_VERSION:-v1}    # bump this to rotate
+    file: ./index.html
+```
+
+A new name is a new object, a new object is a change to the service spec, and *that* is what rolls. The old object is not garbage-collected — `docker config rm` it once nothing references it (Swarm refuses while a service still does). Lab 3.3b walks through both halves.
+
 ### 4.3 Placement
 
 ```bash
@@ -202,7 +223,7 @@ The `target=` keeps the in-container path stable so the application needs no cha
 docker node update --label-add tier=db node2
 ```
 
-> **An unsatisfiable constraint produces tasks that sit in `PENDING` forever, with no warning.** Swarm does not tell you it cannot schedule; it simply never does. `docker service ps <svc> --no-trunc` says `no suitable node (scheduling constraints not satisfied on 3 nodes)`. This is fault 2 of this week's drill.
+> **An unsatisfiable constraint produces tasks that sit in `PENDING` forever, with no warning.** Swarm does not tell you it cannot schedule; it simply never does. `docker service ps <svc> --no-trunc` says `no suitable node (scheduling constraints not satisfied on 3 nodes)`. This is **fault A** of this week's drill, and the reason its service reads `0/6`: a constraint is part of the service spec, so it fails every task at once.
 
 ### 4.4 Node availability
 
@@ -234,16 +255,19 @@ make snapshot VM=node1 NAME=pre-w10
 make break VM=node1 DRILL=10-swarm
 ```
 
-Symptom: *"I scaled to 6 replicas twenty minutes ago. `docker service ls` still says 4/6. All three nodes are Ready."*
+Symptom: *"I scaled to 6 replicas twenty minutes ago. `docker service ls` still says **0/6** — not one is running. All three nodes are Ready."*
 
 The method for **every** scheduling problem, in this order:
 
 ```bash
+docker service ls                      # 0/N or partial? CLASSIFY before you dig
 docker service ps <svc> --no-trunc     # WHY each task is where it is
 docker node ls                         # Ready AND Active? read BOTH columns
-docker service inspect <svc>           # constraints, resources, mode
+docker service inspect <svc>           # constraints, resources, mode, caps
 docker service logs <svc>              # is the app itself crashing?
 ```
+
+> **Read the number before you read anything else.** `0/6` — *every* task pending — points at something in the **service spec**, because constraints, reservations and image references apply to every task identically and therefore fail every task identically. A *partial* count (`4/6`) points instead at capacity or specific nodes: too few eligible nodes, insufficient memory, a per-node replica cap, a drained node. This drill contains one of each, and the second only becomes visible once you have fixed the first.
 
 ## Recommended reading
 

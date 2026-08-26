@@ -7,14 +7,27 @@
 #   Prometheus:  http://<VM_IP>:9090
 # ---------------------------------------------------------------------------
 
+# Every image below is PINNED to an exact version. Week 11 says "never deploy
+# :latest" and this file is not allowed to contradict it - a tag that moves
+# underneath you means the stack you debug on Friday is not the stack you built
+# on Monday, and you will spend the difference hunting a bug that upstream
+# already fixed or already introduced.
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.14.0
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=7d
-      # Needed for Grafana's "Explore" to work well and for recording rules.
       - --web.enable-lifecycle          # POST /-/reload instead of restarting
+    # host.docker.internal is a Docker DESKTOP convenience. On Linux Docker
+    # Engine - which is what this VM runs - the name does not exist at all
+    # unless you map it yourself, and the special value host-gateway is what
+    # resolves it to the host's address on the bridge. Without this line the
+    # `node` and `app` jobs sit permanently DOWN with
+    # "dial tcp: lookup host.docker.internal", the USE dashboard is empty, and
+    # three of the alert rules evaluate against no data - silently.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./prometheus:/etc/prometheus:ro
       - promdata:/prometheus
@@ -22,13 +35,21 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana-oss:13.0.2
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
       # Anonymous viewing makes the lab easier; never do this in production.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Grafana's default console format is logfmt, like Prometheus's and
+      # Loki's. Switching it to JSON is a normal production choice - and it
+      # gives this stack a genuine JSON log producer, so `| json` in Loki has
+      # something real to parse. Lab 4.1b uses the contrast: the parser you
+      # write is a claim about the thing producing the lines, and `| json`
+      # against a logfmt producer fails SILENTLY.
+      GF_LOG_MODE: console
+      GF_LOG_CONSOLE_FORMAT: json
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafanadata:/var/lib/grafana
@@ -39,9 +60,28 @@ services:
   # cAdvisor exposes PER-CONTAINER metrics. Note what it has to mount to do
   # that - it is reading the host's cgroup and container state directly. This
   # is a heavily privileged container; understand that before copying it.
+  #
+  # The image moved registries: gcr.io/cadvisor/cadvisor is stale (it stopped
+  # at v0.55.1, December 2025) and upstream now publishes to ghcr.io.
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    command: ["--docker_only=true", "--housekeeping_interval=10s"]
+    image: ghcr.io/google/cadvisor:v0.60.5
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=10s
+      # CARDINALITY. Read section 2.3 of the README, then read these two flags,
+      # because cAdvisor's DEFAULT is exactly the mistake that section warns
+      # about. With --store_container_labels=true (the default) every Docker
+      # label on a container is promoted to a Prometheus label on every one of
+      # that container's series - 24 measured on this five-container stack,
+      # and the number grows with every image you add, including
+      # com_docker_compose_config_hash, which CHANGES EVERY TIME YOU EDIT THIS
+      # FILE, and com_docker_compose_project_working_dir, which is a full
+      # filesystem path. A changing label value does not modify a series, it
+      # creates a NEW one, so every edit to this file abandons the old series
+      # and starts fresh. Turn the promotion off and allow-list the two labels
+      # that are genuinely bounded and genuinely useful.
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -54,7 +94,7 @@ services:
     restart: unless-stopped
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.7.6
     command: ["-config.file=/etc/loki/loki.yml"]
     volumes:
       - ./loki/loki.yml:/etc/loki/loki.yml:ro
@@ -62,8 +102,13 @@ services:
     ports: ["127.0.0.1:3100:3100"]
     restart: unless-stopped
 
+  # Promtail reached END OF LIFE on 2 March 2026 - see the boxed note in
+  # README.md, Day 3. It is kept here on a deliberate, dated pin because its
+  # config file is the easiest one to read while you are still learning what a
+  # log shipper does. Grafana Alloy is the supported replacement, and
+  # `alloy convert --source-format=promtail` will convert this exact file.
   promtail:
-    image: grafana/promtail:latest
+    image: grafana/promtail:3.6.8
     command: ["-config.file=/etc/promtail/promtail.yml"]
     volumes:
       - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro

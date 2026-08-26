@@ -18,13 +18,17 @@ WantedBy=multi-user.target
 INNER
 systemctl daemon-reload && systemctl enable --now labbackend.service >/dev/null 2>&1 || true
 
+# --- the damage ---
+# proxy_pass points at 9001; the backend above listens on 9000. The note stays
+# out here: this heredoc is written to /etc/nginx/sites-available/lab.conf on the
+# learner's box, and an annotated config is a config that debugs itself.
 cat > /etc/nginx/sites-available/lab.conf <<'INNER'
 server {
     listen 80 default_server;
     server_name _;
 
     location / {
-        proxy_pass http://127.0.0.1:9001;   # backend actually listens on 9000
+        proxy_pass http://127.0.0.1:9001;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_connect_timeout 2s;

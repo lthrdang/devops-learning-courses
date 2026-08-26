@@ -21,24 +21,35 @@ teardown() {
 }
 
 @test "creates an archive and prints its path on stdout" {
-  run "${SCRIPT}" -o "${DEST}" "${SRC}"
+  # bats' `run` merges stderr into $output, and this script logs to stderr on
+  # purpose - so drop stderr here, or the assertion below is checking the log
+  # lines and the path together rather than the stdout contract.
+  run bash -c "'${SCRIPT}' -o '${DEST}' '${SRC}' 2>/dev/null"
   [ "$status" -eq 0 ]
   [ -s "$output" ]
   [[ "$output" == "${DEST}/backup-"*.tar.gz ]]
 }
 
 @test "the archive actually contains the source files" {
-  run "${SCRIPT}" -o "${DEST}" "${SRC}"
+  archive="$("${SCRIPT}" -o "${DEST}" "${SRC}" 2>/dev/null)"
+  run tar -tzf "${archive}"
   [ "$status" -eq 0 ]
-  run tar -tzf "$output"
   [[ "$output" == *"data/a.txt"* ]]
   [[ "$output" == *"data/b.txt"* ]]
 }
 
 @test "writes a matching sha256 sidecar" {
   archive="$("${SCRIPT}" -o "${DEST}" "${SRC}")"
+  # The sidecar is published BEFORE the archive, so if the archive is visible the
+  # sidecar is guaranteed to be too - a consumer watching for backup-*.tar.gz can
+  # never win a race against its own checksum file.
   [ -f "${archive}.sha256" ]
-  ( cd "${DEST}" && run sha256sum -c "$(basename "${archive}").sha256" )
+  # The sidecar records a bare filename, so the check has to run inside DEST -
+  # but `( cd ... && run ... )` would set $status inside a subshell and then
+  # throw the subshell away, leaving nothing to assert on. Put the cd inside the
+  # command that `run` executes instead, and assert on the status afterwards.
+  run bash -c "cd '${DEST}' && sha256sum -c '$(basename "${archive}").sha256'"
+  [ "$status" -eq 0 ]
 }
 
 @test "logs go to stderr, not stdout" {
@@ -97,32 +108,103 @@ teardown() {
   [ -f "${DEST}/backup-20260305-000000.tar.gz" ]
 }
 
-@test "leaves no temporary directory behind on success" {
-  before="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
+@test "leaves no staging directory behind on success" {
+  # The script stages inside DEST - not in /tmp - so that the publishing `mv` is
+  # always a same-filesystem rename. That means the cleanup assertion has to look
+  # where the staging directory actually is; a version of this test that counted
+  # /tmp/tmp.* would now pass unconditionally, and would keep passing with the
+  # EXIT trap deleted outright.
   "${SCRIPT}" -o "${DEST}" "${SRC}" >/dev/null
-  after="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
-  [ "$before" -eq "$after" ]
+  [ "$(find "${DEST}" -maxdepth 1 -name '.backup-staging.*' -type d | wc -l)" -eq 0 ]
 }
 
-@test "leaves no temporary directory behind on failure" {
-  before="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
-  run "${SCRIPT}" -o "${DEST}" "${TMP}/nope"
-  after="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)"
-  [ "$before" -eq "$after" ]
+@test "leaves no staging directory behind on failure" {
+  # The failure has to happen AFTER the staging directory exists, or the test
+  # proves nothing - a bad SOURCE is rejected by the preconditions long before
+  # anything is created. Make verification fail instead: the tar shim writes junk,
+  # the integrity check rejects it, and the script exits 3 from a point where the
+  # staging directory is live and only the EXIT trap can remove it.
+  mkdir -p "${TMP}/bin"
+  cat > "${TMP}/bin/tar" <<'SHIM'
+#!/usr/bin/env bash
+if [[ $1 == -czf ]]; then
+  printf 'not a gzip stream at all' > "$2"
+  exit 0
+fi
+exec /usr/bin/tar "$@"
+SHIM
+  chmod +x "${TMP}/bin/tar"
+  PATH="${TMP}/bin:${PATH}"
+
+  run "${SCRIPT}" -o "${DEST}" "${SRC}"
+  [ "$status" -eq 3 ]
+  [ "$(find "${DEST}" -maxdepth 1 -name '.backup-staging.*' -type d | wc -l)" -eq 0 ]
 }
 
 @test "a second concurrent run is refused by the lock" {
   # Hold the lock in a background subshell, then try to run.
-  lock=/tmp/backup.lock
-  ( exec 9>"$lock"; flock -n 9 && sleep 3 ) &
+  #
+  # The path has to be the one the script actually uses. /var/lock is mode 1777
+  # on Ubuntu, so an unprivileged run opens its lock there and never reaches the
+  # /tmp fallback - a test holding /tmp/backup.lock contends with nobody, and
+  # would pass just as happily with flock deleted from the script entirely.
+  lock=/var/lock/backup.lock
+  ( exec 9>"$lock"; flock -n 9 && sleep 2 ) &
   holder=$!
   sleep 0.3
   run "${SCRIPT}" -o "${DEST}" "${SRC}"
-  kill "$holder" 2>/dev/null || true
+  # Wait the holder out instead of killing it. `sleep` is a child of that
+  # subshell and inherits fd 9, so killing the subshell can orphan a sleep that
+  # still holds the lock - and the leak then fails every test after this one.
   wait "$holder" 2>/dev/null || true
-  # Either it was refused (status 1) or - if the lock path differs because we
-  # are not root - it succeeded. Assert on the refusal message when refused.
-  if [ "$status" -eq 1 ]; then
-    [[ "$output" == *"already running"* ]]
-  fi
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"already running"* ]]
+}
+
+@test "a successful run says so on stderr" {
+  # The regression test for `exec 9>LOCK 2>/dev/null`: that form rebinds fd 2
+  # for the whole remaining run, so every log line after the lock is taken -
+  # "verified:", "done", and every error message - is silently discarded. The
+  # archive still appears and the exit status is still 0, so nothing else in
+  # this file notices. Capture stderr alone (2>&1 >/dev/null dups fd 2 to the
+  # current stdout first, then sends stdout to /dev/null) and insist the
+  # verification actually reported itself.
+  run bash -c "'${SCRIPT}' -o '${DEST}' '${SRC}' 2>&1 >/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"verified:"* ]]
+}
+
+@test "a corrupt archive is rejected with status 3" {
+  # Verification is only worth writing if it can fail, so make tar lie: a shim
+  # earlier in PATH writes garbage where the archive should go and reports
+  # success - which is exactly what a truncated write on a full disk looks like
+  # from the caller's side. The shim delegates every other tar invocation to the
+  # real one, so the integrity check itself runs unmodified.
+  mkdir -p "${TMP}/bin"
+  cat > "${TMP}/bin/tar" <<'SHIM'
+#!/usr/bin/env bash
+if [[ $1 == -czf ]]; then
+  printf 'not a gzip stream at all' > "$2"
+  exit 0
+fi
+exec /usr/bin/tar "$@"
+SHIM
+  chmod +x "${TMP}/bin/tar"
+  PATH="${TMP}/bin:${PATH}"
+
+  run "${SCRIPT}" -o "${DEST}" "${SRC}"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"integrity check"* ]]
+  # And - just as important - the junk must never have been published.
+  [ "$(find "${DEST}" -name 'backup-*.tar.gz' | wc -l)" -eq 0 ]
+}
+
+@test "a destination that cannot be written to fails with status 1" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores the write bit, so this cannot fail as root"
+  ro="${TMP}/readonly"
+  mkdir -p "${ro}"
+  chmod 0555 "${ro}"
+  run "${SCRIPT}" -o "${ro}" "${SRC}"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"destination not writable"* ]]
 }

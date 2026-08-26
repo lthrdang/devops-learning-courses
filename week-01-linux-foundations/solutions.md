@@ -173,8 +173,16 @@ trap shutdown TERM INT
 echo $$ > "$PIDFILE"
 log "started, pidfile=${PIDFILE}"
 reload
-while true; do sleep 1; done
+# `sleep 1 & wait $!`, never a bare `sleep 1`. Bash defers a trap handler while it
+# is waiting on a FOREGROUND child and only runs it once that child exits, so with
+# a plain `sleep 1` the SIGTERM handler fires up to a second late - which is longer
+# than the `sleep 1` the test below waits before checking, and the test becomes a
+# coin flip that "proves" SIGTERM did nothing. `wait` is interruptible, so the
+# signal breaks out of it immediately and the handler runs at once.
+while true; do sleep 1 & wait $!; done
 ```
+
+> **This is the single most common reason a shell-based service looks like it ignores SIGTERM.** The handler is correct, the trap is installed, and the process still dies to the SIGKILL that follows because the handler was queued behind a foreground `sleep`. If you want to watch it happen, swap in `sleep 30`: the same script now takes up to thirty seconds to acknowledge a signal that arrived instantly.
 
 ```bash
 echo "verbose" > /tmp/myapp.conf

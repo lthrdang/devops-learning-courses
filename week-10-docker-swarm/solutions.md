@@ -4,29 +4,26 @@
 
 ## The drill (10-swarm) — worked
 
-The phrasing gives it away: *"all three nodes are **Ready**"*. `Ready` is the `STATUS` column — *can I reach it*. The reporter has not read `AVAILABILITY`, which is *may I schedule on it*.
+**Start with the number, not the logs.** `docker service ls` reads `0/6`. Every single task is unplaced — and that is a *classification*, not just a bad result:
+
+- **all tasks pending** → the cause lives in the **service spec**. Constraints, resource reservations and the image reference apply to every task identically, so they fail every task identically.
+- **some running, some pending** → the cause is about **capacity or particular nodes**: too few eligible nodes, insufficient memory, a per-node replica cap, a drained node.
+
+`0/6` therefore rules out the drained node as *the* explanation before you look at anything, because a drained node cannot stop tasks landing on the other two.
 
 ```bash
-docker service ps web --no-trunc     # ALWAYS first for a scheduling problem
+docker service ls                    # 0/6 — classify first
+docker service ps web --no-trunc     # ALWAYS second for a scheduling problem
 docker node ls                       # read BOTH columns
 ```
 
-**Fault 1 — a drained worker.**
-
-```
-ID   HOSTNAME   STATUS   AVAILABILITY   MANAGER STATUS
-xxx  node2      Ready    Drain
-```
-
-Healthy, reachable, deliberately empty. Someone drained it for maintenance and forgot to reactivate. `docker node update --availability active node2`.
-
-**Fault 2 — an unsatisfiable constraint.**
+**Fault A — an unsatisfiable constraint. This is the 0/6.**
 
 ```
 "no suitable node (scheduling constraints not satisfied on 3 nodes)"
 ```
 
-`node.labels.tier==gold`, and no node carries the label. Tasks sit `PENDING` **forever** with no warning. Either remove the constraint or satisfy it:
+`node.labels.tier==gold`, and no node carries the label. Tasks sit `PENDING` **forever** with no warning — Swarm never reports that it cannot schedule, it simply never does. Either remove the constraint or satisfy it:
 
 ```bash
 docker service inspect web --format '{{json .Spec.TaskTemplate.Placement}}' | jq
@@ -36,10 +33,30 @@ docker service update --constraint-rm 'node.labels.tier == gold' web   # EXACT s
 docker node update --label-add tier=gold node1
 ```
 
-**The two things to carry away:**
+**Fault B — a drained worker. This is why fixing fault A gets you 4/6, not 6/6.**
 
-1. **`--no-trunc` is not optional.** The default truncation cuts the `ERROR` column at exactly the point where it becomes useful.
-2. **`--constraint-rm` is an exact string match, including spaces.** Swarm stores `node.role == worker` with the spacing you wrote; `--constraint-rm 'node.role==worker'` matches nothing, the command **succeeds**, and nothing changes. Always verify with `docker service inspect`, never with the exit code. This one wasted real time during the writing of this course.
+Here is where most people declare victory and walk away. The service moved, so it must be fixed. It is not: you asked for six and you have four.
+
+```
+ID   HOSTNAME   STATUS   AVAILABILITY   MANAGER STATUS
+xxx  node2      Ready    Drain
+```
+
+`Ready` is the `STATUS` column — *can I reach it*. `AVAILABILITY` is *may I schedule on it*, and it reads `Drain`: healthy, reachable, deliberately empty. Someone drained it for maintenance and forgot to reactivate it. `docker node update --availability active node2`.
+
+Note **why** this produced a shortfall at all. The service carries `--replicas-max-per-node 2`, so the cluster has 3 × 2 = 6 slots; drain a node and 2 of them vanish. The remaining tasks say:
+
+```
+"no suitable node (max replicas per node limit exceed)"
+```
+
+Without that cap, Swarm would have stacked all six replicas onto the two surviving nodes and the count would have read a perfectly green `6/6` — with your entire service one machine away from a bad day. That cap is not a fault to be removed; it is the thing that made the drain *visible*.
+
+**The three things to carry away:**
+
+1. **Classify on the replica count first.** `0/N` and a partial count have disjoint sets of causes. One glance eliminates most of the search.
+2. **`--no-trunc` is not optional.** The default truncation cuts the `ERROR` column at exactly the point where it becomes useful.
+3. **`--constraint-rm` is an exact string match, including spaces.** Swarm stores `node.role == worker` with the spacing you wrote; `--constraint-rm 'node.role==worker'` matches nothing, the command **succeeds**, and nothing changes. Always verify with `docker service inspect`, never with the exit code. This one wasted real time during the writing of this course.
 
 ---
 
@@ -56,7 +73,7 @@ docker node update --label-add tier=gold node1
 
 **The distinction that matters: `PENDING` versus `REJECTED`.**
 
-- **`PENDING`** = the *scheduler* could not place the task. Nobody has tried to run anything. Look at constraints, resources, node availability.
+- **`PENDING`** = the *scheduler* has not placed the task. Every task passes through this state normally, in milliseconds; what is diagnostic is a task **stuck** here. It means nobody has tried to run anything yet. Look at constraints, resources, node availability.
 - **`REJECTED`** = a node accepted the task and the *agent* could not start it. Look at the image, the registry credentials, the mounts.
 
 Those send you to completely different places, and reading the state column before the error string saves you from investigating the wrong half of the system.
@@ -92,8 +109,8 @@ done
 | Change | Config required for zero failures |
 |---|---|
 | **Image update** | `order: start-first`, a real `healthcheck`, `delay` > start_period + healthcheck settle, `parallelism: 1` |
-| **Config rotation** | same — configs are immutable, so a change *is* a rolling update |
-| **Secret rotation** | same, plus `target=` so the in-container path does not change |
+| **Config rotation** | same — **plus a versioned config `name:`**. Editing the file alone rotates nothing: the object is immutable and `docker stack deploy` exits 1 with `only updates to Labels are allowed`, leaving the service untouched. Bump `INDEX_VERSION` so a *new* object is created; that is the spec change `update_config` rolls |
+| **Secret rotation** | same, and the same versioned-name rule — plus `target=` so the in-container path does not change while the object name underneath it does |
 | **Drain a node** | `order: start-first` and **spare capacity**: with 3 replicas across 3 nodes and no headroom, draining one forces a rescheduling that cannot start-first |
 | **Hard node stop** | **Not achievable.** See below |
 

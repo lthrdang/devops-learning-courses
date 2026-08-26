@@ -4,28 +4,39 @@
 
 ## The drill (08-compose) — worked through
 
-**Before running anything**, the symptom already narrows it. The API answers, containers are Up, and the error is **500** — not 503. In Part 3 you established that this application returns 503 when a dependency is unreachable. So the dependency is *reachable*; something else is failing. That single observation eliminates "the database is down" before you type a command.
+**Before running anything**, resolve the contradiction in the report — because it is not a contradiction. Everything is `healthy`, `/items` returns 200, *and* logins are failing. All three are true at once.
+
+The reason is in `api/app.py`. Its readiness check is `tcp_probe()`: it opens a TCP socket to `db:5432` and returns. It never authenticates and it never runs a query. So the container `HEALTHCHECK`, `/health` and `/ready` establish exactly one fact — **the port is open** — and `/items` returns a hard-coded list that never touches Postgres at all. **A healthcheck can only fail on the code path it exercises.** This one does not exercise credentials, so no credential problem will ever turn it red.
+
+That single observation tells you where to look before you type a command: at the one component that *does* log in. In this stack that is the `seed` job — which is precisely the thing that broke.
 
 ```bash
-docker compose ps                    # everything Up - as reported
-docker compose logs api | tail -30   # → "password authentication failed for user"
-docker compose logs db | grep -i fatal
-docker compose config | grep -i password
+docker compose ps                            # everything healthy — as reported
+curl -s localhost:8080/items                 # 200 — as reported
+docker compose --profile tools run --rm seed # → password authentication failed for user "postgres"
+docker compose logs db | grep -i 'password authentication failed'
+ls -l secrets/db_password.txt                # mtime: it changed on Friday
+docker compose config | grep -i password     # a PATH — so the value lives in the file
 ```
 
-**Cause 1: the credentials no longer match.** `POSTGRES_PASSWORD` and the API's password diverged. The API process is perfectly healthy — which is exactly why the container is "Up" and only *requests* fail. `docker compose ps` was never going to show this.
-
-**Cause 2, the one that bites you while fixing cause 1:** changing `POSTGRES_PASSWORD` does not change the password of an already-initialised database. It is read only when the data directory is empty. So you fix the variable, recreate, and it *still* fails.
+**Cause 1: the secret was rotated, and the database was not.** Both `api` and `db` mount the same `secrets/db_password.txt`, so everything that *reads* the file now sends the new password. Postgres still has the old one, because `POSTGRES_PASSWORD` / `POSTGRES_PASSWORD_FILE` is consumed **only on the first init of an empty data directory**. The `dbdata` volume already existed, so rewriting the file changed every client and nothing at all in the server. This is the trap from §4.4, arriving as a half-finished rotation.
 
 ```bash
-# The correct fix, with no data loss:
-docker compose exec db psql -U postgres -c "ALTER USER postgres PASSWORD '<new>';"
+# The correct fix, with no data loss — this IS the rotation procedure:
+docker compose exec db psql -U postgres \
+  -c "ALTER USER postgres PASSWORD '$(cat secrets/db_password.txt)';"
 docker compose restart api
+
+# Or put the old value back, if you still have it:
+sudo cp /root/.drill-08-secret.bak secrets/db_password.txt
+sudo chmod 0644 secrets/db_password.txt        # 0644, not 0600 — see the Makefile
 ```
 
-**Cause 3: `condition: service_started` instead of `service_healthy`** on `depends_on`, which is why the failure is intermittent across restarts rather than constant.
+Do **not** reach for `docker compose down -v`. It "works" by destroying the database.
 
-**The generalisable lesson:** *"container Up" is not "application working"*, and the application's own logs are the only place the truth lives. `docker compose ps` tells you about containers; `docker compose logs` tells you about software.
+**Cause 2, entirely independent of the first: `condition: service_started` instead of `service_healthy`** on `depends_on`. Note that this fault produced *no symptom at all* — `connect_with_retry()` in the app absorbed it. That is the case for retry logic in one line: it turns a startup-order bug into a non-event. You find this one with `docker compose config`, not by reading the file you think you already know.
+
+**The generalisable lesson:** *"healthy" means "the checks I wrote passed", and nothing more.* A probe that does not exercise a dependency cannot detect a broken one — so when a healthcheck and a user disagree, the healthcheck is usually the one that is wrong. And a database's init variables only ever apply to an empty volume.
 
 ---
 
@@ -38,20 +49,21 @@ docker compose restart api
 | 3 | in `docker compose config`? | **No** — it prints the file *path* | avoid `environment:` for secrets |
 | 4 | in shell history? | **No** — `make init` generates it with `openssl rand` and redirects to a file | never type a secret as a command argument; `read -s`, a file, or a generator |
 | 5 | in the container's environment? | **No** — the app reads the file at startup | the `_FILE` convention |
-| 6 | who can read the file on the host? | **the owner only** — `chmod 600` | `chmod 600`, and gitignore the directory |
+| 6 | who can read the file on the host? | **every local user** — the file is `chmod 644`, and it has to be | tighten the **directory** to `chmod 700 secrets/`, and gitignore it |
 
 ```bash
 docker inspect stack-api-1 --format '{{json .Config.Env}}' | jq          # no password
 docker compose config | grep -i password                                  # a path, not a value
 docker history lab/stack-api:1.0 | grep -i -c secret                      # 0
-ls -l secrets/db_password.txt                                             # -rw------- 
+ls -ld secrets                                                            # drwx------
+ls -l secrets/db_password.txt                                             # -rw-r--r--
 docker compose exec api cat /run/secrets/db_password                      # present INSIDE only
 ```
 
 **Risks that remain, and whether to accept them on one host:**
 
 - **Anyone in the `docker` group can read the secret**, by exec-ing into the container or mounting the file. Unavoidable — `docker` group membership is root (Week 7). *Accept, and control who is in the group.*
-- **The secret sits in plaintext on the host filesystem.** Mitigated by mode 0600 and disk encryption. *Accept on a single host; on a fleet, use Swarm secrets (Week 10), which are encrypted at rest in Raft and only ever mounted into a tmpfs.*
+- **The secret file is world-readable, and you cannot simply `chmod 600` it.** This is the honest answer to question 6 and the one people get wrong. A Compose `file:` secret is a **bind mount**: the container sees the host file's uid, gid and mode unchanged. `api/Dockerfile` runs as `USER appuser` (uid 10001), so a 0600 file owned by you is unreadable inside the container — `open()` raises `PermissionError` at import, the healthcheck never passes, and `docker compose up` aborts with *"dependency failed to start: container stack-api-1 is unhealthy"*. The `uid:`/`gid:`/`mode:` sub-options that would fix it are **Swarm-only**; Compose accepts them in the YAML and ignores them for file-based secrets. Your real options on one host are: run the container as the uid that owns the file, or leave the file 0644 and protect the *directory* with `chmod 700 secrets/`. *Accept on a single host; on a fleet, use Swarm secrets (Week 10) — mounted from a tmpfs with the uid/gid/mode you ask for, so a 0400 root-owned secret is still readable by uid 10001, and encrypted at rest in Raft.*
 - **Rotation is manual** and, as §4.4 proved, changing the file does not change the database. *This is the real weakness.* Write the rotation runbook **before** you need it — that is the actual deliverable of this challenge.
 
 ---

@@ -100,6 +100,24 @@ check-yaml:  ## Validate every YAML file
 
 define YAMLCHECK_BODY
 import pathlib, yaml, sys
+
+# Compose defines its own YAML tags - `!reset` and `!override` - for clearing
+# and replacing values a previous file in a `-f a.yml -f b.yml` chain set.
+# safe_load has never heard of them and refuses the file. They are valid
+# Compose, so teach the loader about them rather than skipping the file: a
+# compose file is exactly the kind of thing this gate exists to check.
+# See https://github.com/compose-spec/compose-spec/blob/main/13-merge.md
+class CourseLoader(yaml.SafeLoader):
+    pass
+def _tagged(loader, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    return loader.construct_mapping(node, deep=True)
+for _tag in ('!reset', '!override'):
+    CourseLoader.add_constructor(_tag, _tagged)
+
 bad = []
 for f in pathlib.Path('.').rglob('*.y*ml'):
     if 'site/' in str(f):
@@ -110,7 +128,7 @@ for f in pathlib.Path('.').rglob('*.y*ml'):
     if f.name == 'mkdocs.yml':
         continue
     try:
-        list(yaml.safe_load_all(f.read_text()))
+        list(yaml.load_all(f.read_text(), Loader=CourseLoader))
     except Exception as e:
         bad.append(f"{f}: {e}")
 print("\n".join(bad) if bad else "yaml: all valid")

@@ -160,7 +160,7 @@ time nc -vz -w5 beta 9999        # refused, immediately
 
 Clean up on `beta`: `sudo nft delete table inet lab`
 
-### 2.3 TCP states
+### 2.3 TCP states — and which machine ends up in TIME_WAIT
 
 On `beta`: `python3 -m http.server 8080 --bind 0.0.0.0 &`
 On `alpha`:
@@ -170,11 +170,40 @@ ss -tn state established
 curl -s http://beta:8080/ >/dev/null
 ss -tn | head
 for i in $(seq 1 50); do curl -s http://beta:8080/ >/dev/null; done
-ss -tn state time-wait | wc -l          # TIME_WAIT accumulating
+```
+
+Now count `TIME_WAIT`. **On both machines.** Do not skip either one — the whole point of this exercise is the difference between them.
+
+```bash
+# on alpha (the client that made all 50 requests)
+ss -tn state time-wait | tail -n +2 | wc -l
+
+# on beta (the server)
+ss -tn state time-wait | tail -n +2 | wc -l
+ss -tn state time-wait | head                 # keep the header - read Local Address:Port
 ss -s
 ```
 
-> Explain in your logbook why `TIME_WAIT` exists at all, and what would go wrong without it.
+> **`tail -n +2` is not cosmetic.** `ss` prints its column header even when a state filter matches nothing at all, so a bare `ss -tn state time-wait | wc -l` is always exactly one too high — it reports `1` for zero sockets. That off-by-one is small enough to survive a code review and big enough to make an empty result look like a real one.
+
+Alpha shows roughly nothing. Beta is full of them, and every one has **beta's own port 8080 as the local address**. Write down why you think that is before you read on.
+
+> **The rule: `TIME_WAIT` belongs to whoever sends the first `FIN`** — the side performing the *active close*. `python3 -m http.server` speaks HTTP/1.0 and closes the connection after every single response, so in this lab the **server** is the one hanging up, and the server is the one that pays. Count on the client, find nothing, and you conclude `TIME_WAIT` is a myth — which is exactly the wrong lesson, and a very common one.
+>
+> Keep the diagnostic, because it works everywhere: **"which side has the `TIME_WAIT`s?" answers "who is hanging up?"** A load balancer stacked with `TIME_WAIT` toward a backend is a load balancer that is not reusing connections. A database server stacked with them means your pool is not pooling. It is a free answer, on a live system, to a question that otherwise needs a packet capture.
+
+Now go looking for the knobs everyone tells you to turn — on `beta`:
+
+```bash
+sysctl net.ipv4.tcp_fin_timeout      # exists, and has NOTHING to do with TIME_WAIT
+sysctl net.ipv4.tcp_tw_reuse         # exists: client-side only, defaults to 2 (loopback only)
+sysctl net.ipv4.tcp_tw_recycle       # ERROR - this one was removed from the kernel
+sysctl -a 2>/dev/null | grep -i timewait
+```
+
+That last one is a trap worth walking into: the only hits are `nf_conntrack_*_timeout_timewait`, which are the **connection tracker's** idea of how long to remember a flow — a completely different subsystem from the TCP socket state, and changing them does nothing to a `TIME_WAIT` socket. There is no sysctl for the TIME_WAIT duration. The 60 seconds is `TCP_TIMEWAIT_LEN`, compiled into the kernel. Read §2.3 of the README for what each of those knobs actually does, then note in your logbook which of them you have seen recommended as a "TIME_WAIT fix".
+
+> Explain in your logbook why `TIME_WAIT` exists at all, and what would go wrong without it — and why the fix for `TIME_WAIT` pressure is keep-alive rather than any of the sysctls above.
 
 ### 2.4 Privileged ports
 
@@ -200,10 +229,15 @@ resolvectl status
 ```bash
 # 3.1 The two different paths
 getent hosts beta                      # goes through NSS: reads /etc/hosts
-dig beta +short                        # queries DNS directly: probably nothing
+dig beta +short                        # answers! and NOT because DNS knows the name
+dig @1.1.1.1 beta +short               # nothing. no DNS server anywhere holds this name
 ```
 
-> **This is the lesson.** `dig` returned nothing while `getent` succeeded, because the answer is in `/etc/hosts` and `dig` does not read it. If you had debugged with `dig` alone you would have concluded DNS was broken.
+> **This is the lesson.** `dig` with no `@server` is not "querying DNS directly" — on Ubuntu 24.04 it queries whatever is in `/etc/resolv.conf`, which is the **systemd-resolved stub listener on 127.0.0.53**. And resolved reads `/etc/hosts` itself (`ReadEtcHosts=yes` is the default), so it happily answers for `beta` out of a file, dressed up as a DNS response. The moment you aim at a real upstream with `@1.1.1.1`, the answer disappears — because there was never a DNS record, only a line in a text file.
+>
+> Check the resolver you are actually talking to: `dig beta | grep SERVER` says `127.0.0.53#53`, and `resolvectl status` shows what sits behind it.
+>
+> The operational rule that falls out of this: **`getent hosts <name>` for what the application will see, `dig @<upstream> <name>` for what DNS actually holds.** They disagree far more often than people expect — `/etc/hosts`, `nsswitch.conf` ordering, mDNS, and a stub cache all live in the gap — and when they disagree, the *application* is right about its own behaviour and `dig` is right about DNS. Reaching for only one of them is how you spend an afternoon "fixing DNS" that was never broken.
 
 ```bash
 # 3.2 Real DNS

@@ -120,7 +120,16 @@ sudo -l                     # what are you allowed to run as root?
 getent passwd ubuntu        # the authoritative lookup (not just /etc/passwd)
 ```
 
-**`sudo` is not "become root".** It is "run *this command* as another user, subject to the policy in `/etc/sudoers`, and log it". The difference matters: `sudo` leaves an audit trail in `/var/log/auth.json` or the journal, and its policy can be narrow. A team where everyone runs `sudo su -` has thrown away both properties.
+**`sudo` is not "become root".** It is "run *this command* as another user, subject to the policy in `/etc/sudoers`, and log it". The difference matters: `sudo` leaves an audit trail, and its policy can be narrow. A team where everyone runs `sudo su -` has thrown away both properties.
+
+Where that trail lands is worth knowing before you need it at 2am. `sudo` logs through syslog's `authpriv` facility, and on Ubuntu rsyslog routes `auth,authpriv.*` to **`/var/log/auth.log`** — you can read the rule yourself in `/etc/rsyslog.d/50-default.conf`. The same records also reach the journal, so `journalctl -t sudo` gives you the identical events with `--since`/`--until` filtering and no log-rotation archaeology:
+
+```bash
+sudo grep sudo: /var/log/auth.log | tail -20       # the file rsyslog writes
+journalctl -t sudo --since "1 hour ago"            # the same events, queryable
+```
+
+Each line records who ran it, from which terminal, in which directory, as which target user, and the exact command — which is precisely the set of facts an incident review asks for and `sudo su -` destroys, because everything after that first `su` is logged as one line: "root started a shell".
 
 **Group membership is loaded at login.** After `usermod -aG docker ubuntu`, your *current* shell still lacks the group. `id` proves it. You need a new login session (or `newgrp docker`). Every single person hits this with Docker in Week 7.
 
